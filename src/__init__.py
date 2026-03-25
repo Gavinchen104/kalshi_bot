@@ -1,0 +1,2 @@
+"""Kalshi bot source package."""
+

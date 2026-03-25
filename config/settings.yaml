@@ -1,0 +1,72 @@
+app:
+  name: kalshi-bot
+  env: dev
+  paper_mode: true
+  log_level: INFO
+
+risk:
+  max_position_per_market: 100
+  max_order_size: 3
+  max_daily_loss_cents: 5000
+  max_drawdown_cents: 3000
+  max_data_age_seconds: 10
+  max_gross_exposure: 500
+  max_orders_per_minute: 120
+
+strategy:
+  min_edge_bps: 100
+  min_top_book_depth: 10
+  max_spread_cents: 10
+  target_market_regex: ".*BTC.*"
+  use_ml_model: true
+  model_path: data/models/btc_15m_model.json
+  min_model_confidence: 0.08
+  feature_lookback: 20
+  cost_floor_bps: 150
+  n_ensemble_models: 3
+  max_kelly_contracts: 3
+  default_order_size: 1
+  bankroll_cents: 50000
+
+execution:
+  default_order_size: 1
+  min_order_interval_ms: 500
+  min_price_cents: 1
+  max_price_cents: 99
+  fee_bps: 50
+  slippage_bps: 20
+  take_profit_pct: 0.25
+  stop_loss_pct: 0.15
+
+markets:
+  allowlist: []
+  symbol_filters:
+    - BTC
+
+storage:
+  db_path: data/bot.db
+
+testing:
+  mock_data_path: data/mock_market_stream.jsonl
+  use_mock_data_stream: false
+
+autotrain:
+  enabled: true
+  interval_minutes: 5
+  min_market_states: 200
+  market_like: BTC
+  horizon: 15
+  limit: 600000
+  epochs: 200
+  lr: 0.05
+  min_retrains_before_pause: 12
+  plateau_window: 8
+  plateau_accuracy_span_threshold: 0.005
+  plateau_logloss_span_threshold: 0.03
+  pause_minutes_on_plateau: 30
+
+binance:
+  enabled: true
+  ws_url: "wss://ws-feed.exchange.coinbase.com"
+  history_candles: 300
+  save_interval_seconds: 30

@@ -1,0 +1,30 @@
+# Secrets — NEVER commit
+.env
+
+# Data files (large, local-only)
+data/bot.db
+data/bot.db-journal
+data/bot.db-wal
+data/models/*.json
+data/models/*.lgb
+data/mock_market_stream.jsonl
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
