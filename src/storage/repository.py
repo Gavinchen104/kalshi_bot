@@ -103,6 +103,25 @@ class Repository:
             )
         return len(candles)
 
+    def upsert_live_spot(self, price: float) -> None:
+        """Write the current Coinbase spot price to a single-row table.
+        Called frequently (~500ms) so the dashboard can render sub-second updates."""
+        with self._conn() as c:
+            c.execute(
+                "INSERT OR REPLACE INTO live_spot(id, price, updated_at) "
+                "VALUES (1, ?, datetime('now'))",
+                (price,),
+            )
+
+    def get_live_spot(self) -> dict | None:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT price, updated_at FROM live_spot WHERE id = 1"
+            ).fetchone()
+        if not row:
+            return None
+        return {"price": float(row[0]), "updated_at": row[1]}
+
     def save_pnl(self, total: int, realized: int, unrealized: int) -> None:
         with self._conn() as c:
             c.execute(

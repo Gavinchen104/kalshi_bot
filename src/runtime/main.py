@@ -23,6 +23,62 @@ from src.types import ProposedOrder
 logger = get_logger("runtime.main")
 
 
+async def _fast_spot_writer(repo, coinbase_store) -> None:
+    """Upsert the latest Coinbase spot price every 500ms so the dashboard
+    sees sub-second updates without waiting for minute candle closes."""
+    while True:
+        await asyncio.sleep(0.5)
+        try:
+            price = coinbase_store.latest_price
+            if price is not None:
+                repo.upsert_live_spot(price)
+        except Exception as exc:
+            logger.warning("fast_spot_writer_failed", error=str(exc))
+
+
+async def _periodic_housekeeping(
+    repo,
+    coinbase_store,
+    settings,
+    state_marker: dict,
+) -> None:
+    """Persist Coinbase candles + run calibration on a fixed cadence,
+    independent of whether Kalshi WS is producing market state updates.
+
+    Also emits a heartbeat log so a stalled main loop is visible in logs."""
+    while True:
+        await asyncio.sleep(10)
+        try:
+            candles = coinbase_store.closed_candle_dicts()
+            if candles:
+                n = repo.save_candles(candles)
+                logger.debug("housekeeping_candles_saved", n=n)
+        except Exception as exc:
+            logger.warning("housekeeping_candles_failed", error=str(exc))
+
+        # Heartbeat: surfaces "alive but Kalshi silent" state.
+        now = time.monotonic()
+        secs_since_kalshi = now - state_marker.get("last_kalshi_ts", now)
+        logger.info(
+            "heartbeat",
+            secs_since_kalshi_state=int(secs_since_kalshi),
+            coinbase_candles=coinbase_store.candle_count,
+            spot=coinbase_store.latest_price,
+        )
+
+        # Calibration runs every ~2 minutes.
+        if (now - state_marker.get("last_calibration_ts", 0)) > 120.0:
+            try:
+                settle_and_snapshot(
+                    repo,
+                    window=settings.measurement.calibration_window,
+                    n_bins=settings.measurement.calibration_bins,
+                )
+                state_marker["last_calibration_ts"] = now
+            except Exception as exc:
+                logger.warning("calibration_failed", error=str(exc))
+
+
 async def run() -> None:
     settings = load_settings()
     configure_logging(settings.app.log_level)
@@ -86,11 +142,16 @@ async def run() -> None:
         market_tickers=btc_tickers,
     )
 
-    last_candle_persist = 0.0
-    last_calibration = 0.0
+    # Shared marker so the housekeeping task can detect a stalled Kalshi feed.
+    state_marker: dict = {"last_kalshi_ts": time.monotonic(), "last_calibration_ts": 0.0}
+    housekeeping_task = asyncio.create_task(
+        _periodic_housekeeping(repo, coinbase_store, settings, state_marker)
+    )
+    fast_spot_task = asyncio.create_task(_fast_spot_writer(repo, coinbase_store))
 
     try:
         async for state in kalshi_ws.stream():
+            state_marker["last_kalshi_ts"] = time.monotonic()
             repo.save_market_state(state)
             mark = state.last_trade_cents or (
                 (state.bid_cents + state.ask_cents) // 2
@@ -109,23 +170,6 @@ async def run() -> None:
             if est is None:
                 continue
             repo.save_prob_estimate(est, state)
-
-            # Periodic housekeeping that must run regardless of whether a
-            # tradeable signal fires this iteration.
-            now = time.monotonic()
-            if now - last_candle_persist > 30.0:
-                repo.save_candles(coinbase_store.closed_candle_dicts())
-                last_candle_persist = now
-            if now - last_calibration > 120.0:
-                try:
-                    settle_and_snapshot(
-                        repo,
-                        window=settings.measurement.calibration_window,
-                        n_bins=settings.measurement.calibration_bins,
-                    )
-                except Exception as exc:
-                    logger.warning("calibration_failed", error=str(exc))
-                last_calibration = now
 
             signal = strategy.evaluate(est, state)
             if signal is None:
@@ -172,11 +216,12 @@ async def run() -> None:
 
             repo.save_pnl(pnl.total_cents, pnl.realized_cents, pnl.unrealized_cents)
     finally:
-        coinbase_task.cancel()
-        try:
-            await coinbase_task
-        except (asyncio.CancelledError, Exception):
-            pass
+        for task in (coinbase_task, housekeeping_task, fast_spot_task):
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 def main() -> None:

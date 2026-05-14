@@ -85,3 +85,12 @@ CREATE TABLE IF NOT EXISTS calibration_snapshot (
     bin_json TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Single-row table holding the most recent Coinbase tick price.
+-- Upserted ~every 500ms so the dashboard can show sub-second spot updates
+-- without depending on minute candle closes.
+CREATE TABLE IF NOT EXISTS live_spot (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    price REAL NOT NULL,
+    updated_at TEXT NOT NULL
+);
