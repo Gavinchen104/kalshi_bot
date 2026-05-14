@@ -51,6 +51,13 @@ class StrategyConfig(BaseModel):
     max_kelly_contracts: int = 10
     default_order_size: int = 1
     bankroll_cents: int = 50_000
+    # "ml" (existing model-driven flow) or "threshold" (price >= entry_prob, exit at exit_prob)
+    mode: str = "ml"
+    entry_prob_threshold: int = 95
+    exit_prob_threshold: int = 85
+    window_minutes: int = 15
+    last_minutes_window: int = 3
+    require_coinbase_ready: bool = True
 
 
 class ExecutionConfig(BaseModel):

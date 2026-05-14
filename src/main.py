@@ -21,6 +21,7 @@ from src.risk.limits import RiskEngine
 from src.storage.repository import Repository
 from src.strategy.exit_manager import ExitManager
 from src.strategy.signals import Strategy
+from src.strategy.threshold import ThresholdExitManager, ThresholdStrategy
 from src.training.auto_retrainer import AutoRetrainer
 
 
@@ -32,6 +33,10 @@ async def run() -> None:
     configure_logging(settings.app.log_level)
     paper_mode = settings.app.paper_mode or settings.env.bot_paper_mode
     live_allowed = settings.env.bot_allow_live_trading
+    threshold_mode = settings.strategy.mode == "threshold"
+    if threshold_mode and not paper_mode:
+        logger.warning("threshold_mode_forces_paper")
+        paper_mode = True
     if not paper_mode and not live_allowed:
         raise RuntimeError(
             "Live trading is locked. Set BOT_ALLOW_LIVE_TRADING=true to enable real orders."
@@ -61,11 +66,27 @@ async def run() -> None:
 
     repository = Repository(settings.storage.db_path)
 
-    strategy = Strategy(
-        settings.strategy,
-        btc_store=btc_store,
-        bankroll_cents=settings.strategy.bankroll_cents,
-    )
+    if threshold_mode:
+        strategy = ThresholdStrategy(
+            settings.strategy,
+            btc_store=btc_store,
+            bankroll_cents=settings.strategy.bankroll_cents,
+        )
+        # Threshold mode is high-conviction by design: bias filled signals
+        # toward our entry threshold so the router prices at ask, not midpoint.
+        logger.info(
+            "threshold_mode_enabled",
+            entry_prob=settings.strategy.entry_prob_threshold,
+            exit_prob=settings.strategy.exit_prob_threshold,
+            last_minutes=settings.strategy.last_minutes_window,
+            window_minutes=settings.strategy.window_minutes,
+        )
+    else:
+        strategy = Strategy(
+            settings.strategy,
+            btc_store=btc_store,
+            bankroll_cents=settings.strategy.bankroll_cents,
+        )
     router = OrderRouter(settings.execution, strategy=strategy)
     kill_switch = KillSwitch()
     exposure = ExposureBook()
@@ -84,10 +105,15 @@ async def run() -> None:
         repository=repository,
         strategy=strategy,
     )
-    exit_manager = ExitManager(
-        take_profit_pct=settings.execution.take_profit_pct,
-        stop_loss_pct=settings.execution.stop_loss_pct,
-    )
+    if threshold_mode:
+        exit_manager = ThresholdExitManager(
+            exit_prob_threshold=settings.strategy.exit_prob_threshold,
+        )
+    else:
+        exit_manager = ExitManager(
+            take_profit_pct=settings.execution.take_profit_pct,
+            stop_loss_pct=settings.execution.stop_loss_pct,
+        )
     pnl_tracker = PnLTracker()
 
     last_positions = repository.latest_positions()
@@ -185,7 +211,8 @@ async def run() -> None:
                     repository.save_btc_candles(candle_dicts)
                     _last_candle_save = now
 
-            await auto_retrainer.maybe_retrain()
+            if not threshold_mode:
+                await auto_retrainer.maybe_retrain()
             if paper_mode:
                 await paper_settler.maybe_settle()
             else:

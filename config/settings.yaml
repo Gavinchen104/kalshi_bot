@@ -27,6 +27,14 @@ strategy:
   max_kelly_contracts: 3
   default_order_size: 1
   bankroll_cents: 50000
+  # "ml" = existing ML-driven flow; "threshold" = paper-mode test of the
+  # >=95c-in-last-3min entry / <=85c exit strategy.
+  mode: threshold
+  entry_prob_threshold: 95
+  exit_prob_threshold: 85
+  window_minutes: 15
+  last_minutes_window: 3
+  require_coinbase_ready: true
 
 execution:
   default_order_size: 1

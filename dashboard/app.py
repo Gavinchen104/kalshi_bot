@@ -29,7 +29,18 @@ refresh_seconds = st.sidebar.slider("Refresh interval (sec)", min_value=1, max_v
 
 db_exists = Path(db_path).exists()
 if not db_exists:
-    st.warning(f"Database not found at `{db_path}`. Start the bot first to create it.")
+    st.warning(
+        f"Database not found at `{db_path}`. Start the bot in another terminal "
+        "(`python -m src.main`) — this page will auto-refresh once it appears."
+    )
+    if hasattr(st, "fragment"):
+        @st.fragment(run_every=f"{refresh_seconds}s" if auto_refresh else None)
+        def _wait_for_db() -> None:
+            if Path(db_path).exists():
+                st.rerun()
+            else:
+                st.caption(f"Polling for `{db_path}`…")
+        _wait_for_db()
     st.stop()
 
 repo = Repository(db_path)
@@ -75,16 +86,110 @@ def render_panels() -> None:
     btc_candle_count = repo.btc_candle_count()
     hb3.metric("BTC Spot Candles (DB)", btc_candle_count)
 
-    # ── BTC Spot Price ────────────────────────────────────────────────────
-    btc_candles = repo.btc_candle_series(limit=5)
-    if btc_candles:
-        latest_candle = btc_candles[-1]
-        st.subheader("BTC Spot Price (Binance)")
-        s1, s2, s3, s4 = st.columns(4)
-        s1.metric("Price", f"${latest_candle['close']:,.2f}")
-        s2.metric("High", f"${latest_candle['high']:,.2f}")
-        s3.metric("Low", f"${latest_candle['low']:,.2f}")
-        s4.metric("Volume", f"{latest_candle['volume']:,.1f} BTC")
+    # ── Live View: Kalshi vs Coinbase BTC ────────────────────────────────
+    st.subheader("Live View — Kalshi (left) vs Coinbase BTC (right)")
+    kalshi_series = repo.market_state_series(market_like="BTC", limit=300)
+    btc_candles_full = repo.btc_candle_series(limit=300)
+
+    live_left, live_right = st.columns(2)
+
+    with live_left:
+        st.markdown("### Kalshi BTC Market")
+        if latest_btc_market:
+            try:
+                payload = json.loads(latest_btc_market.get("payload_json") or "{}")
+            except Exception:
+                payload = {}
+            st.caption(f"`{latest_btc_market.get('market_id') or 'N/A'}` · updated {latest_btc_market.get('created_at', 'N/A')}")
+            bid = payload.get("bid_cents")
+            ask = payload.get("ask_cents")
+            last = payload.get("last_trade_cents")
+            spread = (ask - bid) if (isinstance(ask, int) and isinstance(bid, int)) else None
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Bid", f"{bid}c" if bid is not None else "—")
+            k2.metric("Ask", f"{ask}c" if ask is not None else "—")
+            k3.metric("Last", f"{last}c" if last is not None else "—")
+            k4.metric("Spread", f"{spread}c" if spread is not None else "—")
+        else:
+            st.info("No Kalshi BTC snapshot yet.")
+
+        if kalshi_series:
+            latest_market_id = kalshi_series[-1].market_id
+            single_market = [s for s in kalshi_series if s.market_id == latest_market_id]
+            chart_pts = [
+                {
+                    "time": s.updated_at.isoformat(),
+                    "bid_c": s.bid_cents,
+                    "ask_c": s.ask_cents,
+                    "last_c": s.last_trade_cents,
+                }
+                for s in single_market
+                if s.bid_cents is not None or s.ask_cents is not None
+            ]
+            if chart_pts:
+                st.line_chart(chart_pts, x="time", y=["bid_c", "ask_c", "last_c"], height=260)
+            else:
+                st.info("Waiting for Kalshi price ticks…")
+        else:
+            st.info("No Kalshi market_state history yet.")
+
+        # Recent BTC trades from the trade log
+        btc_trades = [t for t in repo.recent_filled_trades(limit=200) if "BTC" in (t.get("market") or "").upper()][:10]
+        st.markdown("**Recent BTC Trades**")
+        if btc_trades:
+            st.dataframe(
+                [
+                    {
+                        "Time": t["time"],
+                        "Action": t["action"],
+                        "Qty": t["contracts"],
+                        "Fill": f'{t["fill_price_cents"]}c' if t["fill_price_cents"] else "-",
+                        "Status": t["status"],
+                    }
+                    for t in btc_trades
+                ],
+                width="stretch",
+                height=240,
+            )
+        else:
+            st.caption("No filled trades on a BTC market yet.")
+
+    with live_right:
+        st.markdown("### Coinbase BTC-USD")
+        if btc_candles_full:
+            latest_candle = btc_candles_full[-1]
+            prior_close = btc_candles_full[-2]["close"] if len(btc_candles_full) > 1 else latest_candle["open"]
+            delta = latest_candle["close"] - prior_close
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Price", f"${latest_candle['close']:,.2f}", f"{delta:+,.2f}")
+            c2.metric("High", f"${latest_candle['high']:,.2f}")
+            c3.metric("Low", f"${latest_candle['low']:,.2f}")
+            c4.metric("Volume", f"{latest_candle['volume']:,.2f} BTC")
+
+            price_chart = [
+                {
+                    "time": datetime.fromtimestamp(c["timestamp_ms"] / 1000, tz=timezone.utc).isoformat(),
+                    "close": c["close"],
+                    "high": c["high"],
+                    "low": c["low"],
+                }
+                for c in btc_candles_full
+            ]
+            st.line_chart(price_chart, x="time", y=["close", "high", "low"], height=260)
+
+            vol_chart = [
+                {
+                    "time": datetime.fromtimestamp(c["timestamp_ms"] / 1000, tz=timezone.utc).isoformat(),
+                    "volume": c["volume"],
+                }
+                for c in btc_candles_full[-120:]
+            ]
+            st.markdown("**Volume (last 120 candles)**")
+            st.bar_chart(vol_chart, x="time", y="volume", height=160)
+        else:
+            st.info("No Coinbase candles yet — wait for the BTC WS feed to populate.")
+
+    st.divider()
 
     # ── Portfolio Equity Curve ────────────────────────────────────────────
     STARTING_BALANCE = 500.00
@@ -169,23 +274,6 @@ def render_panels() -> None:
         st.dataframe(pos_rows, width="stretch")
     else:
         st.info("No open positions.")
-
-    # ── Current BTC Market (Kalshi) ───────────────────────────────────────
-    st.subheader("Current BTC Market (Kalshi)")
-    if latest_btc_market:
-        payload = {}
-        try:
-            payload = json.loads(latest_btc_market["payload_json"])
-        except Exception:
-            pass
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Market", latest_btc_market["market_id"] or "N/A")
-        c2.metric("Bid", payload.get("bid_cents", "N/A"))
-        c3.metric("Ask", payload.get("ask_cents", "N/A"))
-        c4.metric("Last", payload.get("last_trade_cents", "N/A"))
-        c5.metric("Updated", latest_btc_market["created_at"])
-    else:
-        st.info("No BTC market snapshot yet.")
 
     # ── Fill Quality ──────────────────────────────────────────────────────
     st.subheader("Fill Quality")
