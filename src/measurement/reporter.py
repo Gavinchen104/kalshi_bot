@@ -42,7 +42,15 @@ def settle_and_snapshot(repo: Repository, window: int = 500, n_bins: int = 10) -
         nearest = min(candles_by_ts, key=lambda c: abs(c["timestamp_ms"] - close_ms))
         if abs(nearest["timestamp_ms"] - close_ms) > 2 * 60_000:
             continue
-        outcome = 1 if nearest["close"] >= terms.strike_usd else 0
+        settle_price = float(nearest["close"])
+        if terms.direction == "above":
+            if terms.strike_usd is None:
+                continue
+            outcome = 1 if settle_price >= terms.strike_usd else 0
+        else:  # bracket
+            if terms.bracket_low_usd is None or terms.bracket_high_usd is None:
+                continue
+            outcome = 1 if (terms.bracket_low_usd <= settle_price < terms.bracket_high_usd) else 0
         pairs.append((float(e["prob"]), outcome))
         if len(pairs) >= window:
             break

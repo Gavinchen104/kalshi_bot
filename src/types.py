@@ -21,11 +21,18 @@ class MarketState:
 
 @dataclass(frozen=True)
 class ContractTerms:
-    """Parsed Kalshi BTC 15m contract metadata."""
+    """Parsed Kalshi BTC contract metadata.
+
+    direction:
+      "above"   — pays $1 if BTC_T > strike_usd at close_time. (KXBTCD-*-T<strike>)
+      "bracket" — pays $1 if bracket_low_usd <= BTC_T < bracket_high_usd. (KXBTC-*-B<low>)
+    """
     market_id: str
-    strike_usd: float
     close_time: datetime
-    direction: Literal["above", "below"]
+    direction: Literal["above", "bracket"]
+    strike_usd: float | None = None
+    bracket_low_usd: float | None = None
+    bracket_high_usd: float | None = None
 
 
 @dataclass(frozen=True)

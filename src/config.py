@@ -40,6 +40,10 @@ class PricerConfig(BaseModel):
     vol_floor_annualized: float = 0.20
     vol_ceiling_annualized: float = 3.00
     min_horizon_seconds: int = 5
+    # Default native bracket width for KXBTC-*-B<low> 15m markets. Series-specific
+    # widths (e.g. $500 instead of $250) should be inferred in Phase 2 from
+    # observed adjacent strikes in the same series.
+    bracket_width_usd_default: float = 250.0
 
 
 class StrategyConfig(BaseModel):

@@ -18,11 +18,16 @@ pricer:
   vol_floor_annualized: 0.20
   vol_ceiling_annualized: 3.00
   min_horizon_seconds: 5
+  # Default bracket width for KXBTC-*-B<low> markets (15-min). Active series
+  # are mostly $250; some use $500. Phase 2 should infer per-series via Kalshi REST.
+  bracket_width_usd_default: 250.0
 
 strategy:
   edge_threshold: 0.04
   min_horizon_seconds: 30
-  max_horizon_seconds: 900
+  # Bumped from 900 (15m) to 86400 (24h) so daily KXBTCD-* markets are eligible.
+  # BS-from-realized-vol degrades at long horizons; revisit once we measure calibration.
+  max_horizon_seconds: 86400
   max_spread_cents: 10
   min_top_book_depth: 5
 

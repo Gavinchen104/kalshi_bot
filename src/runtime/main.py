@@ -5,6 +5,7 @@ import time
 
 from src.config import load_settings
 from src.data.coinbase_ws import CoinbaseStore, fetch_history, run_ws as run_coinbase_ws
+from src.data.kalshi_rest import KalshiClient
 from src.data.kalshi_ws import KalshiWSClient
 from src.execution.paper_executor import PaperExecutor
 from src.measurement.reporter import settle_and_snapshot
@@ -53,6 +54,7 @@ async def run() -> None:
         vol_floor=settings.pricer.vol_floor_annualized,
         vol_ceiling=settings.pricer.vol_ceiling_annualized,
         min_horizon_seconds=settings.pricer.min_horizon_seconds,
+        bracket_width_usd_default=settings.pricer.bracket_width_usd_default,
     )
     strategy = EdgeStrategy(settings.strategy)
     kill = KillSwitch()
@@ -60,11 +62,28 @@ async def run() -> None:
     executor = PaperExecutor(settings.execution)
     pnl = PnLTracker()
 
+    # Fetch the currently-open BTC market tickers so we can explicitly subscribe.
+    # Kalshi's WS v2 ticker channel sends nothing without an explicit market list.
+    kalshi_rest = KalshiClient(
+        base_url=settings.kalshi.base_url,
+        api_key=settings.env.kalshi_api_key,
+        api_secret=settings.env.kalshi_api_secret,
+    )
+    try:
+        btc_tickers = await kalshi_rest.list_open_btc_markets()
+        logger.info("kalshi_btc_markets_loaded", n=len(btc_tickers))
+    except Exception as exc:
+        logger.warning("kalshi_btc_markets_failed", error=str(exc))
+        btc_tickers = []
+    finally:
+        await kalshi_rest.close()
+
     kalshi_ws = KalshiWSClient(
         ws_url=settings.kalshi.ws_url,
         api_key=settings.env.kalshi_api_key,
         api_secret=settings.env.kalshi_api_secret,
         ticker_regex=settings.kalshi.ticker_regex,
+        market_tickers=btc_tickers,
     )
 
     last_candle_persist = 0.0
@@ -90,6 +109,23 @@ async def run() -> None:
             if est is None:
                 continue
             repo.save_prob_estimate(est, state)
+
+            # Periodic housekeeping that must run regardless of whether a
+            # tradeable signal fires this iteration.
+            now = time.monotonic()
+            if now - last_candle_persist > 30.0:
+                repo.save_candles(coinbase_store.closed_candle_dicts())
+                last_candle_persist = now
+            if now - last_calibration > 120.0:
+                try:
+                    settle_and_snapshot(
+                        repo,
+                        window=settings.measurement.calibration_window,
+                        n_bins=settings.measurement.calibration_bins,
+                    )
+                except Exception as exc:
+                    logger.warning("calibration_failed", error=str(exc))
+                last_calibration = now
 
             signal = strategy.evaluate(est, state)
             if signal is None:
@@ -135,21 +171,6 @@ async def run() -> None:
                     )
 
             repo.save_pnl(pnl.total_cents, pnl.realized_cents, pnl.unrealized_cents)
-
-            now = time.monotonic()
-            if now - last_candle_persist > 30.0:
-                repo.save_candles(coinbase_store.closed_candle_dicts())
-                last_candle_persist = now
-            if now - last_calibration > 120.0:
-                try:
-                    settle_and_snapshot(
-                        repo,
-                        window=settings.measurement.calibration_window,
-                        n_bins=settings.measurement.calibration_bins,
-                    )
-                except Exception as exc:
-                    logger.warning("calibration_failed", error=str(exc))
-                last_calibration = now
     finally:
         coinbase_task.cancel()
         try:

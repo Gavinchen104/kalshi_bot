@@ -1,14 +1,13 @@
 """
-Best-effort parser for Kalshi BTC 15-minute market tickers.
+Parser for Kalshi BTC market tickers.
 
-Observed ticker patterns include forms like:
-    KXBTC-26MAY1314-T108500     -> BTC ≥ $108,500 at 14:00 UTC on 2026-05-13
-    KXBTCD-26MAY1314-T108500    -> same with KXBTCD prefix
-    KXBTC15M-26MAY1314-T108500
+Two contract families currently handled:
+    KXBTCD-<YY><MMM><DD><HH>-T<strike>   — daily above-strike, pays $1 if BTC_T > strike.
+    KXBTC-<YY><MMM><DD><HH>-B<low>       — 15-min bracket, pays $1 if low <= BTC_T < low + width.
 
-The parser is intentionally lenient: if it cannot pin down the close time
-from the ticker, the caller can fall back to the next 15-minute wall-clock
-boundary, which is the right answer for every active 15m market.
+The intraday bracket width is series-dependent ($250 or $500 are common). We
+default to `bracket_width_usd_default` from config and infer per-series later
+when a BracketRegistry observes adjacent strikes (Phase 2).
 """
 from __future__ import annotations
 
@@ -23,10 +22,10 @@ _MONTHS = {
     "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
 }
 
-# KXBTC<optional suffix>-<YY><MMM><DD><HH>-T<strike>
-# The hour code in the middle field is a 2-digit hour-of-day in UTC.
+# KXBTC<optional letters/digits>-<YY><MMM><DD><HH>-<T|B><strike-or-low>
 _TICKER_RE = re.compile(
-    r"^KXBTC[A-Z0-9]*-(?P<yy>\d{2})(?P<mon>[A-Z]{3})(?P<dd>\d{2})(?P<hh>\d{2})-T(?P<strike>\d+)$",
+    r"^KXBTC[A-Z0-9]*-(?P<yy>\d{2})(?P<mon>[A-Z]{3})(?P<dd>\d{2})(?P<hh>\d{2})"
+    r"-(?P<kind>[TB])(?P<strike>\d+(?:\.\d+)?)$",
     re.IGNORECASE,
 )
 
@@ -40,8 +39,12 @@ def next_quarter_boundary(now: datetime) -> datetime:
     return base + timedelta(minutes=minute)
 
 
-def parse_ticker(market_id: str, now: datetime | None = None) -> ContractTerms | None:
-    """Parse a Kalshi BTC 15m ticker. Returns None if the ticker isn't recognizable."""
+def parse_ticker(
+    market_id: str,
+    now: datetime | None = None,
+    bracket_width_usd: float = 250.0,
+) -> ContractTerms | None:
+    """Parse a Kalshi BTC ticker. Returns None if the ticker isn't recognizable."""
     if now is None:
         now = datetime.now(tz=timezone.utc)
 
@@ -57,14 +60,10 @@ def parse_ticker(market_id: str, now: datetime | None = None) -> ContractTerms |
         year = 2000 + int(m.group("yy"))
         day = int(m.group("dd"))
         hour = int(m.group("hh"))
-        strike = float(m.group("strike"))
+        strike_field = float(m.group("strike"))
     except ValueError:
         return None
 
-    # The hour in the ticker corresponds to the *closing* hour. For BTC 15m
-    # markets the close minute is determined by which window within the hour.
-    # Without more info we anchor to the next :00/:15/:30/:45 boundary at or
-    # after that wall-clock hour.
     try:
         anchor = datetime(year, mon_idx, day, hour, 0, 0, tzinfo=timezone.utc)
     except ValueError:
@@ -72,16 +71,25 @@ def parse_ticker(market_id: str, now: datetime | None = None) -> ContractTerms |
 
     close_time = anchor if anchor >= now else next_quarter_boundary(now)
 
+    kind = m.group("kind").upper()
+    if kind == "T":
+        return ContractTerms(
+            market_id=market_id,
+            close_time=close_time,
+            direction="above",
+            strike_usd=strike_field,
+        )
+    # kind == "B": range bracket
     return ContractTerms(
         market_id=market_id,
-        strike_usd=strike,
         close_time=close_time,
-        direction="above",
+        direction="bracket",
+        bracket_low_usd=strike_field,
+        bracket_high_usd=strike_field + bracket_width_usd,
     )
 
 
 def fallback_close_time(now: datetime | None = None) -> datetime:
-    """If the ticker is unparseable, use the next 15-min boundary as a best guess."""
     if now is None:
         now = datetime.now(tz=timezone.utc)
     return next_quarter_boundary(now)

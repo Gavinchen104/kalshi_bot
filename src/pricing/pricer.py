@@ -1,16 +1,17 @@
 """
-Closed-form binary pricer for Kalshi BTC 15m contracts.
+Closed-form binary pricer for Kalshi BTC contracts.
 
 Model: BTC spot follows a driftless geometric Brownian motion under the
-short-horizon, risk-neutral assumption. For a contract paying $1 if
-BTC_T > strike at expiry,
+short-horizon, risk-neutral assumption. Two payoff shapes are supported.
 
-    P(BTC_T > K) = N(d2)
-    d2 = (ln(S/K) - 0.5 * σ^2 * T) / (σ * sqrt(T))
+Above-strike (KXBTCD-*-T<strike>):
+    P(BTC_T > K) = N(d2(K))
+    d2(K) = (ln(S/K) - 0.5 * σ^2 * T) / (σ * sqrt(T))
 
-where T is time-to-expiry in years and σ is annualized vol.
+Range bracket (KXBTC-*-B<low>):
+    P(K_lo <= BTC_T < K_hi) = N(d2(K_lo)) - N(d2(K_hi))
 
-At 15-minute horizons the 0.5σ²T term is tiny but included for correctness.
+T is time-to-expiry in years; σ is annualized vol.
 """
 from __future__ import annotations
 
@@ -19,9 +20,14 @@ from datetime import datetime, timezone
 
 from scipy.stats import norm
 
-from src.pricing.ticker import fallback_close_time, parse_ticker
+from src.pricing.ticker import parse_ticker
 from src.pricing.volatility import MINUTES_PER_YEAR, clamp_vol, close_to_close_vol
 from src.types import ContractTerms, ProbEstimate
+
+
+def _d2(spot_usd: float, strike_usd: float, sigma_annualized: float, T_years: float) -> float:
+    vol_t = sigma_annualized * math.sqrt(T_years)
+    return (math.log(spot_usd / strike_usd) - 0.5 * sigma_annualized**2 * T_years) / vol_t
 
 
 def price_yes_prob(
@@ -32,32 +38,48 @@ def price_yes_prob(
 ) -> float:
     """P(spot > strike at expiry) under driftless lognormal."""
     if spot_usd <= 0 or strike_usd <= 0 or horizon_seconds <= 0 or sigma_annualized <= 0:
-        # Degenerate inputs: collapse to indicator on current spot.
         return 1.0 if spot_usd > strike_usd else 0.0
-
     T = horizon_seconds / (MINUTES_PER_YEAR * 60.0)
-    vol_t = sigma_annualized * math.sqrt(T)
-    if vol_t <= 0:
+    if sigma_annualized * math.sqrt(T) <= 0:
         return 1.0 if spot_usd > strike_usd else 0.0
+    return float(norm.cdf(_d2(spot_usd, strike_usd, sigma_annualized, T)))
 
-    d2 = (math.log(spot_usd / strike_usd) - 0.5 * sigma_annualized**2 * T) / vol_t
-    return float(norm.cdf(d2))
+
+def price_bracket_prob(
+    spot_usd: float,
+    bracket_low_usd: float,
+    bracket_high_usd: float,
+    horizon_seconds: float,
+    sigma_annualized: float,
+) -> float:
+    """P(low <= spot_T < high) under driftless lognormal."""
+    if bracket_high_usd <= bracket_low_usd:
+        return 0.0
+    if spot_usd <= 0 or horizon_seconds <= 0 or sigma_annualized <= 0:
+        return 1.0 if (bracket_low_usd <= spot_usd < bracket_high_usd) else 0.0
+    T = horizon_seconds / (MINUTES_PER_YEAR * 60.0)
+    if sigma_annualized * math.sqrt(T) <= 0:
+        return 1.0 if (bracket_low_usd <= spot_usd < bracket_high_usd) else 0.0
+    # P(spot > low) - P(spot > high) = P(low <= spot < high)
+    p_above_low = float(norm.cdf(_d2(spot_usd, bracket_low_usd, sigma_annualized, T)))
+    p_above_high = float(norm.cdf(_d2(spot_usd, bracket_high_usd, sigma_annualized, T)))
+    return max(0.0, p_above_low - p_above_high)
 
 
 class CoinbasePricer:
-    """Builds a ProbEstimate for a Kalshi BTC 15m market using Coinbase data."""
-
     def __init__(
         self,
         vol_window_minutes: int = 60,
         vol_floor: float = 0.20,
         vol_ceiling: float = 3.00,
         min_horizon_seconds: int = 5,
+        bracket_width_usd_default: float = 250.0,
     ) -> None:
         self.vol_window_minutes = vol_window_minutes
         self.vol_floor = vol_floor
         self.vol_ceiling = vol_ceiling
         self.min_horizon_seconds = min_horizon_seconds
+        self.bracket_width_usd_default = bracket_width_usd_default
 
     def price(
         self,
@@ -70,10 +92,10 @@ class CoinbasePricer:
         if now is None:
             now = datetime.now(tz=timezone.utc)
 
-        terms = terms_override or parse_ticker(market_id, now=now)
+        terms = terms_override or parse_ticker(
+            market_id, now=now, bracket_width_usd=self.bracket_width_usd_default
+        )
         if terms is None:
-            # Unparseable ticker — still try with fallback close_time and a
-            # missing strike will short-circuit below.
             return None
 
         horizon = (terms.close_time - now).total_seconds()
@@ -85,18 +107,34 @@ class CoinbasePricer:
         if sigma is None:
             return None
 
-        prob = price_yes_prob(
-            spot_usd=spot_usd,
-            strike_usd=terms.strike_usd,
-            horizon_seconds=horizon,
-            sigma_annualized=sigma,
-        )
+        if terms.direction == "above":
+            if terms.strike_usd is None:
+                return None
+            prob = price_yes_prob(
+                spot_usd=spot_usd,
+                strike_usd=terms.strike_usd,
+                horizon_seconds=horizon,
+                sigma_annualized=sigma,
+            )
+            source = "coinbase_phi_above"
+        else:
+            if terms.bracket_low_usd is None or terms.bracket_high_usd is None:
+                return None
+            prob = price_bracket_prob(
+                spot_usd=spot_usd,
+                bracket_low_usd=terms.bracket_low_usd,
+                bracket_high_usd=terms.bracket_high_usd,
+                horizon_seconds=horizon,
+                sigma_annualized=sigma,
+            )
+            source = "coinbase_phi_bracket"
+
         return ProbEstimate(
             market_id=market_id,
             prob=prob,
             horizon_seconds=horizon,
             spot_usd=spot_usd,
             vol_annualized=sigma,
-            source="coinbase_phi",
+            source=source,
             computed_at=now,
         )
