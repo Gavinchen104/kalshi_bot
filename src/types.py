@@ -4,12 +4,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-
 Side = Literal["yes", "no"]
 
 
-@dataclass
+@dataclass(frozen=True)
 class MarketState:
+    """Top-of-book snapshot of a Kalshi market at one instant."""
     market_id: str
     bid_cents: int | None
     ask_cents: int | None
@@ -19,22 +19,42 @@ class MarketState:
     updated_at: datetime
 
 
-@dataclass
+@dataclass(frozen=True)
+class ContractTerms:
+    """Parsed Kalshi BTC 15m contract metadata."""
+    market_id: str
+    strike_usd: float
+    close_time: datetime
+    direction: Literal["above", "below"]
+
+
+@dataclass(frozen=True)
+class ProbEstimate:
+    """A pricer's view of the YES probability for a market."""
+    market_id: str
+    prob: float
+    horizon_seconds: float
+    spot_usd: float
+    vol_annualized: float
+    source: str
+    computed_at: datetime
+
+
+@dataclass(frozen=True)
 class Signal:
     market_id: str
     side: Side
-    edge_bps: int
-    fair_value_cents: int
+    our_prob: float
+    market_prob: float
+    edge: float
+    fair_price_cents: int
     reason: str
-    predicted_prob: float | None = None
-    model_name: str | None = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class ProposedOrder:
     market_id: str
     side: Side
     price_cents: int
     quantity: int
     tif: str = "GTC"
-
