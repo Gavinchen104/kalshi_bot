@@ -309,7 +309,8 @@ def render() -> None:
     )
 
     # ═══ TOP STATUS STRIP ═══════════════════════════════════════════════════
-    btc_now = float(closes[-1]) if closes.size else None
+    # Prefer the live (sub-second) spot tick; fall back to the latest closed candle.
+    btc_now = float(live_spot["price"]) if live_spot else (float(closes[-1]) if closes.size else None)
     btc_1m = float(closes[-2]) if closes.size >= 2 else btc_now
     btc_15m = float(closes[-15]) if closes.size >= 15 else btc_now
     btc_1h = float(closes[-60]) if closes.size >= 60 else btc_now
@@ -351,10 +352,22 @@ def render() -> None:
     with sc[0]:
         st.markdown("<div class='bb-header'>BTC SPOT</div>", unsafe_allow_html=True)
         col = color_for(d1m)
+        # Show age of the live spot tick — should stay under a second when bot is healthy.
+        spot_age_label = ""
+        if live_spot:
+            try:
+                spot_ts = datetime.fromisoformat(live_spot["updated_at"].replace(" ", "T"))
+                if spot_ts.tzinfo is None:
+                    spot_ts = spot_ts.replace(tzinfo=timezone.utc)
+                age_ms = int((now_utc - spot_ts).total_seconds() * 1000)
+                age_col = GREEN if age_ms < 2000 else (AMBER if age_ms < 10000 else RED)
+                spot_age_label = f" · <span style='color:{age_col}'>tick {age_ms}ms</span>"
+            except Exception:
+                pass
         st.markdown(
             f"<div class='bb-tick {tick_class}' style='color:{col}; padding: 2px 4px; border-radius: 3px;'>"
             f"${btc_now:,.2f}</div>"
-            f"<div class='bb-sub'>1m {d1m:+,.2f} · 15m {d15:+,.2f} · 1h {d1h:+,.2f}</div>"
+            f"<div class='bb-sub'>1m {d1m:+,.2f} · 15m {d15:+,.2f} · 1h {d1h:+,.2f}{spot_age_label}</div>"
             if btc_now is not None else "<div class='bb-tick bb-neu'>—</div>",
             unsafe_allow_html=True,
         )
