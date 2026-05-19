@@ -6,6 +6,7 @@ import json
 import time
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import httpx
 import numpy as np
@@ -123,6 +124,73 @@ async def fetch_history(rest_url: str, product_id: str, limit: int = 300) -> lis
         )
     candles.sort(key=lambda c: c.timestamp_ms)
     return candles[-limit:] if limit else candles
+
+
+_COINBASE_MAX_CANDLES = 300  # Exchange API hard cap of candles per request
+
+
+def _rows_to_candles(data) -> list[Candle]:
+    """Parse Coinbase Exchange candle rows [time, low, high, open, close, vol]."""
+    out: list[Candle] = []
+    for row in data:
+        out.append(Candle(
+            timestamp_ms=int(row[0]) * 1000,
+            low=float(row[1]), high=float(row[2]),
+            open=float(row[3]), close=float(row[4]),
+            volume=float(row[5]), is_closed=True,
+        ))
+    return out
+
+
+def _http_window_fetcher(rest_url: str, product_id: str):
+    async def _fetch(start_iso: str, end_iso: str):
+        url = f"{rest_url}?granularity=60&start={start_iso}&end={end_iso}"
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            return r.json()
+    return _fetch
+
+
+async def backfill_range(
+    rest_url: str,
+    product_id: str,
+    start_ms: int,
+    end_ms: int,
+    *,
+    pause_s: float = 0.2,
+    _window_fetcher=None,
+) -> list[Candle]:
+    """Backfill 1-minute candles over [start_ms, end_ms) via paginated Coinbase
+    REST.
+
+    The Exchange candles endpoint returns at most 300 candles per request, so
+    the range is walked in 300-minute windows. Returns candles sorted ascending
+    and deduped by timestamp (windows are half-open but a 1-candle overlap from
+    Coinbase rounding is harmless).
+
+    `_window_fetcher(start_iso, end_iso) -> list[row]` is injectable so the
+    pagination/dedupe logic is unit-testable without HTTP. `pause_s` throttles
+    real requests to the public endpoint (tests pass 0.0).
+    """
+    if end_ms <= start_ms:
+        return []
+
+    fetcher = _window_fetcher or _http_window_fetcher(rest_url, product_id)
+    window_ms = _COINBASE_MAX_CANDLES * 60_000
+    by_ts: dict[int, Candle] = {}
+    cur = start_ms
+    while cur < end_ms:
+        win_end = min(cur + window_ms, end_ms)
+        start_iso = datetime.fromtimestamp(cur / 1000, tz=timezone.utc).isoformat()
+        end_iso = datetime.fromtimestamp(win_end / 1000, tz=timezone.utc).isoformat()
+        rows = await fetcher(start_iso, end_iso)
+        for c in _rows_to_candles(rows):
+            by_ts[c.timestamp_ms] = c
+        cur = win_end
+        if pause_s:
+            await asyncio.sleep(pause_s)
+    return sorted(by_ts.values(), key=lambda c: c.timestamp_ms)
 
 
 async def run_ws(store: CoinbaseStore, ws_url: str, product_id: str = "BTC-USD") -> None:
