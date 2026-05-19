@@ -152,6 +152,40 @@ def _http_window_fetcher(rest_url: str, product_id: str):
     return _fetch
 
 
+def find_candle_gaps(
+    existing_ts: list[int],
+    start_ms: int,
+    end_ms: int,
+    min_gap_candles: int = 5,
+    step_ms: int = 60_000,
+) -> list[tuple[int, int]]:
+    """Return half-open [gap_start, gap_end) ranges missing candles within
+    [start_ms, end_ms).
+
+    Only gaps spanning >= `min_gap_candles` missing minutes are reported — tiny
+    1-2 candle hiccups aren't worth a REST round-trip. `existing_ts` need not be
+    sorted.
+    """
+    in_window = sorted(t for t in existing_ts if start_ms <= t < end_ms)
+    gaps: list[tuple[int, int]] = []
+    lead_thr = min_gap_candles * step_ms
+    internal_thr = (min_gap_candles + 1) * step_ms
+
+    if not in_window:
+        if end_ms - start_ms >= lead_thr:
+            gaps.append((start_ms, end_ms))
+        return gaps
+
+    if in_window[0] - start_ms >= lead_thr:
+        gaps.append((start_ms, in_window[0]))
+    for a, b in zip(in_window, in_window[1:]):
+        if b - a >= internal_thr:
+            gaps.append((a + step_ms, b))
+    if end_ms - in_window[-1] - step_ms >= lead_thr:
+        gaps.append((in_window[-1] + step_ms, end_ms))
+    return gaps
+
+
 async def backfill_range(
     rest_url: str,
     product_id: str,

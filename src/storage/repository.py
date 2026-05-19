@@ -198,6 +198,17 @@ class Repository:
             for r in rows
         ]
 
+    def candle_timestamps(self, start_ms: int, end_ms: int) -> list[int]:
+        """Existing candle timestamps within [start_ms, end_ms), ascending.
+        Used for gap detection (cheap: timestamps only, not full OHLCV)."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT timestamp_ms FROM coinbase_candle "
+                "WHERE timestamp_ms >= ? AND timestamp_ms < ? ORDER BY timestamp_ms ASC",
+                (start_ms, end_ms),
+            ).fetchall()
+        return [int(r[0]) for r in rows]
+
     def recent_prob_estimates(self, limit: int = 500) -> list[dict]:
         with self._conn() as c:
             rows = c.execute(

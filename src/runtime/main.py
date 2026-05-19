@@ -4,7 +4,13 @@ import asyncio
 import time
 
 from src.config import load_settings
-from src.data.coinbase_ws import CoinbaseStore, fetch_history, run_ws as run_coinbase_ws
+from src.data.coinbase_ws import (
+    CoinbaseStore,
+    backfill_range,
+    fetch_history,
+    find_candle_gaps,
+    run_ws as run_coinbase_ws,
+)
 from src.data.kalshi_rest import KalshiClient
 from src.data.kalshi_ws import KalshiWSClient
 from src.execution.paper_executor import PaperExecutor
@@ -79,6 +85,37 @@ async def _periodic_housekeeping(
                 logger.warning("calibration_failed", error=str(exc))
 
 
+async def _backfill_candle_gaps(repo, settings) -> int:
+    """Detect missing minute ranges in coinbase_candle over the last
+    settings.coinbase.backfill_max_hours and backfill them from Coinbase REST.
+    Best-effort: a failure here must never block bot startup."""
+    now_ms = int(time.time() * 1000)
+    start_ms = now_ms - settings.coinbase.backfill_max_hours * 3600 * 1000
+    existing = repo.candle_timestamps(start_ms, now_ms)
+    gaps = find_candle_gaps(existing, start_ms, now_ms)
+    total = 0
+    for g_start, g_end in gaps:
+        try:
+            candles = await backfill_range(
+                settings.coinbase.rest_candles_url,
+                settings.coinbase.product_id,
+                g_start, g_end,
+            )
+        except Exception as exc:
+            logger.warning(
+                "candle_backfill_window_failed",
+                start=g_start, end=g_end, error=str(exc),
+            )
+            continue
+        if candles:
+            total += repo.save_candles([
+                {"timestamp_ms": c.timestamp_ms, "open": c.open, "high": c.high,
+                 "low": c.low, "close": c.close, "volume": c.volume}
+                for c in candles
+            ])
+    return total
+
+
 async def run() -> None:
     settings = load_settings()
     configure_logging(settings.app.log_level)
@@ -97,6 +134,13 @@ async def run() -> None:
         logger.info("coinbase_history_loaded", n=coinbase_store.candle_count)
     except Exception as exc:
         logger.warning("coinbase_history_failed", error=str(exc))
+
+    # Repair candle continuity for settlement/backtest (best-effort).
+    try:
+        n_filled = await _backfill_candle_gaps(repo, settings)
+        logger.info("candle_gaps_backfilled", n=n_filled)
+    except Exception as exc:
+        logger.warning("candle_backfill_failed", error=str(exc))
 
     coinbase_task = asyncio.create_task(
         run_coinbase_ws(coinbase_store, settings.coinbase.ws_url, settings.coinbase.product_id)

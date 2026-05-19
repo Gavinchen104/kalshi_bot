@@ -33,6 +33,8 @@ class CoinbaseConfig(BaseModel):
     rest_candles_url: str
     product_id: str = "BTC-USD"
     history_candles: int = 300
+    # On startup, backfill missing candle minutes going back at most this far.
+    backfill_max_hours: int = 48
 
 
 class PricerConfig(BaseModel):

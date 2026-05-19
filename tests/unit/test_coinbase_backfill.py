@@ -9,7 +9,35 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.data.coinbase_ws import backfill_range
+from src.data.coinbase_ws import backfill_range, find_candle_gaps
+
+
+M = 60_000  # one minute in ms
+
+
+def test_find_gaps_no_existing_returns_full_range():
+    assert find_candle_gaps([], 0, 100 * M) == [(0, 100 * M)]
+
+
+def test_find_gaps_tiny_hole_ignored():
+    # 2-minute hole (< default min_gap_candles=5) is not worth a request.
+    ts = [0, M, 2 * M, 6 * M, 7 * M]  # missing 3,4,5
+    assert find_candle_gaps(ts, 0, 8 * M) == []
+
+
+def test_find_gaps_internal_leading_trailing():
+    # existing: minutes 10..12 only, window 0..30
+    ts = [10 * M, 11 * M, 12 * M]
+    gaps = find_candle_gaps(ts, 0, 30 * M, min_gap_candles=5)
+    # leading [0,10m), trailing [13m,30m); no internal gap
+    assert (0, 10 * M) in gaps
+    assert (13 * M, 30 * M) in gaps
+
+
+def test_find_gaps_internal_only():
+    ts = [0, M, 2 * M, 20 * M, 21 * M]  # big hole between 2m and 20m
+    gaps = find_candle_gaps(ts, 0, 22 * M, min_gap_candles=5)
+    assert (3 * M, 20 * M) in gaps
 
 
 def _ms(y, mo, d, h, mi) -> int:

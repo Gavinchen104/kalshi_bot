@@ -12,6 +12,7 @@ coinbase:
   rest_candles_url: https://api.exchange.coinbase.com/products/BTC-USD/candles
   product_id: BTC-USD
   history_candles: 300
+  backfill_max_hours: 48
 
 pricer:
   vol_window_minutes: 60
