@@ -1,0 +1,50 @@
+# Kalshi BTC Bot — Roadmap
+
+_Index of all phase plans. Read this first._
+
+**The through-line question:** Can a volatility-based binary pricer
+systematically beat Kalshi's BTC market prices — and if so, can we run it
+safely with real money?
+
+Every phase exists to answer one slice of that, behind a **binding decision
+gate**. Gates are not suggestions: a failed gate stops or redirects work. No
+live trading before Phase 3 GATE C.
+
+---
+
+## Phase map
+
+| Phase | Objective | Binding gate | Status | Plan |
+|---|---|---|---|---|
+| **1 — Build & Discover** | Build Strategy 2 (BS pricer vs Kalshi) end-to-end + dashboard + backtest; find out if it works | Post-mortem: is there *any* signal? | ✅ Complete (negative result) | [PHASE1_PLAN.md](PHASE1_PLAN.md) |
+| **2 — Remediate & Validate** | Fix the bugs Phase 1 exposed; horizon-matched vol; prove or disprove the pricer can be calibrated | **GATE A** — pricer calibration on backtest | 🔄 In progress | [PHASE2_PLAN.md](PHASE2_PLAN.md) |
+| **3 — Live or Pivot** | If GATE A passes: validate forward → tiny-size live. If it fails: escalating pivots, then hard stop | **GATE B/C** (live) or **mini-gates** (pivot) | ⏸ Gated on GATE A | [PHASE3_PLAN.md](PHASE3_PLAN.md) |
+| **4 — Operate & Scale** | Run as a production system; scale capital responsibly; detect alpha decay | **GATE D** (each scale step) | ⏸ Gated on GATE C | [PHASE4_PLAN.md](PHASE4_PLAN.md) |
+
+---
+
+## Where we are now
+
+**Phase 2, mid-flight.** WS2 (bug fixes) and WS3 (data continuity) are
+committed. The core fix — WS1 horizon-matched volatility — and the GATE A
+evaluation are the remaining Phase 2 work (Commit B / tasks T09–T19).
+
+**Phase 1's verdict was negative:** the strategy as originally built does *not*
+work (pricer ~96× overconfident on tails, log loss 1.28 — worse than a coin
+flip). Phases 2–4 only have value if Phase 2's GATE A shows the pricer can be
+fixed. If it can't, Phase 3 Track B governs an honest pivot-or-stop.
+
+---
+
+## Operating principles (apply to every phase)
+
+1. **Gates are binding.** A failed gate redirects or halts work — it is never a
+   cue to "keep tweaking until the number looks good."
+2. **Fail fast, cheaply.** Cheapest viable approach first; escalate only on a
+   measured miss; stop when the escalation ladder is exhausted.
+3. **No look-ahead, no self-grading.** Validate forward and against the actual
+   settlement source, not the feed we price from.
+4. **No real money before Phase 3 GATE C**, and only behind a written go/no-go
+   checklist with human sign-off.
+5. **Every claim is a number.** "Looks good" is not a result; a Brier score on
+   out-of-sample data is.
