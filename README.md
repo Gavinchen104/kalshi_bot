@@ -26,7 +26,15 @@ BOT_ALLOW_LIVE_TRADING=true
 4. Run the bot:
 
 ```bash
-python -m src.main
+python -m src.runtime.main
+```
+
+   For unattended/production use, run it under the supervisor instead — it
+   restarts on crash/stall with capped backoff and writes timestamped logs to
+   `logs/`:
+
+```bash
+./scripts/run_bot.sh
 ```
 
 5. Run dashboard (in another terminal):

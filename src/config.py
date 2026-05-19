@@ -35,6 +35,10 @@ class CoinbaseConfig(BaseModel):
     history_candles: int = 300
     # On startup, backfill missing candle minutes going back at most this far.
     backfill_max_hours: int = 48
+    # How often the runtime re-checks for and repairs candle gaps.
+    gap_repair_interval_minutes: int = 15
+    # Periodic repair only scans this recent a window (lighter than startup).
+    gap_repair_lookback_hours: int = 3
 
 
 class PricerConfig(BaseModel):

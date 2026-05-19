@@ -13,6 +13,8 @@ coinbase:
   product_id: BTC-USD
   history_candles: 300
   backfill_max_hours: 48
+  gap_repair_interval_minutes: 15
+  gap_repair_lookback_hours: 3
 
 pricer:
   vol_window_minutes: 60

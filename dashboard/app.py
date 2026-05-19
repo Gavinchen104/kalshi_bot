@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.data.coinbase_ws import find_candle_gaps
 from src.storage.repository import Repository
 
 
@@ -347,7 +349,7 @@ def render() -> None:
 
     latest_pnl = pnl[-1] if pnl else {"total_cents": 0, "realized_cents": 0, "unrealized_cents": 0}
 
-    sc = st.columns([1.4, 1.0, 1.0, 1.0, 1.0, 1.2])
+    sc = st.columns([1.4, 1.0, 1.0, 1.0, 1.0, 1.2, 1.2])
 
     with sc[0]:
         st.markdown("<div class='bb-header'>BTC SPOT</div>", unsafe_allow_html=True)
@@ -438,6 +440,30 @@ def render() -> None:
             st.markdown(
                 "<div class='bb-tick bb-neu'>PENDING</div>"
                 "<div class='bb-sub'>awaiting first resolution</div>",
+                unsafe_allow_html=True,
+            )
+
+    with sc[6]:
+        st.markdown("<div class='bb-header'>DATA QUALITY · 48H</div>", unsafe_allow_html=True)
+        try:
+            now_ms = int(time.time() * 1000)
+            start_ms = now_ms - 48 * 3600 * 1000
+            ts = repo.candle_timestamps(start_ms, now_ms)
+            expected = 48 * 60
+            coverage = (len(ts) / expected * 100) if expected else 0.0
+            gaps = find_candle_gaps(ts, start_ms, now_ms, min_gap_candles=1)
+            max_gap_min = max((b - a) // 60_000 for a, b in gaps) if gaps else 0
+            cov_col = GREEN if coverage >= 95 else (AMBER if coverage >= 80 else RED)
+            n_settled = cal["n_samples"] if cal else 0
+            st.markdown(
+                f"<div class='bb-tick' style='color:{cov_col}'>{coverage:.0f}% cov</div>"
+                f"<div class='bb-sub'>max gap {max_gap_min}m · settled {n_settled:,}</div>",
+                unsafe_allow_html=True,
+            )
+        except Exception as exc:
+            st.markdown(
+                f"<div class='bb-tick bb-neu'>—</div>"
+                f"<div class='bb-sub'>{type(exc).__name__}</div>",
                 unsafe_allow_html=True,
             )
 

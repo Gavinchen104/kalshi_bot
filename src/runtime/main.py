@@ -85,12 +85,33 @@ async def _periodic_housekeeping(
                 logger.warning("calibration_failed", error=str(exc))
 
 
-async def _backfill_candle_gaps(repo, settings) -> int:
+async def _periodic_gap_repair(repo, settings) -> None:
+    """Re-run gap detection + backfill on a fixed cadence so candle continuity
+    self-heals after a transient Coinbase WS disconnect, without waiting for a
+    process restart. Cheap when there are no gaps (one timestamps query, no
+    REST calls). Best-effort."""
+    interval = max(60, settings.coinbase.gap_repair_interval_minutes * 60)
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            n = await _backfill_candle_gaps(
+                repo, settings,
+                lookback_hours=settings.coinbase.gap_repair_lookback_hours,
+            )
+            if n:
+                logger.info("gap_repair_filled", n=n)
+        except Exception as exc:
+            logger.warning("gap_repair_failed", error=str(exc))
+
+
+async def _backfill_candle_gaps(repo, settings, lookback_hours: int | None = None) -> int:
     """Detect missing minute ranges in coinbase_candle over the last
-    settings.coinbase.backfill_max_hours and backfill them from Coinbase REST.
-    Best-effort: a failure here must never block bot startup."""
+    `lookback_hours` (defaults to settings.coinbase.backfill_max_hours for the
+    startup full sweep; periodic repair passes a lighter recent window) and
+    backfill them from Coinbase REST. Best-effort: never blocks startup."""
+    hours = lookback_hours or settings.coinbase.backfill_max_hours
     now_ms = int(time.time() * 1000)
-    start_ms = now_ms - settings.coinbase.backfill_max_hours * 3600 * 1000
+    start_ms = now_ms - hours * 3600 * 1000
     existing = repo.candle_timestamps(start_ms, now_ms)
     gaps = find_candle_gaps(existing, start_ms, now_ms)
     total = 0
@@ -192,6 +213,7 @@ async def run() -> None:
         _periodic_housekeeping(repo, coinbase_store, settings, state_marker)
     )
     fast_spot_task = asyncio.create_task(_fast_spot_writer(repo, coinbase_store))
+    gap_repair_task = asyncio.create_task(_periodic_gap_repair(repo, settings))
 
     try:
         async for state in kalshi_ws.stream():
@@ -260,7 +282,7 @@ async def run() -> None:
 
             repo.save_pnl(pnl.total_cents, pnl.realized_cents, pnl.unrealized_cents)
     finally:
-        for task in (coinbase_task, housekeeping_task, fast_spot_task):
+        for task in (coinbase_task, housekeeping_task, fast_spot_task, gap_repair_task):
             task.cancel()
             try:
                 await task
