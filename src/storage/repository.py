@@ -214,6 +214,17 @@ class Repository:
                 "market_yes_bid_cents")
         return [dict(zip(keys, r)) for r in rows]
 
+    def prob_estimates_for_settlement(self) -> list[dict]:
+        """All (market_id, prob) rows oldest-first, for outcome settlement.
+
+        Unlike recent_prob_estimates, this is NOT recency-limited: settlement
+        must look back at older estimates whose markets have since closed."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT market_id, prob FROM prob_estimate ORDER BY id ASC"
+            ).fetchall()
+        return [{"market_id": r[0], "prob": float(r[1])} for r in rows]
+
     def recent_signals(self, limit: int = 200) -> list[dict]:
         with self._conn() as c:
             rows = c.execute(

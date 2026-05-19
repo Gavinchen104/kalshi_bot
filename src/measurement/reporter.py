@@ -2,11 +2,19 @@
 Pairs prob_estimates with realized outcomes after settlement, then writes a
 calibration snapshot.
 
-Outcome inference for v1: parse the ticker → (strike, close_time). If close_time
-has passed, find the closest Coinbase candle to close_time and decide YES (close >= strike)
-or NO. Calibration windows over the most recent N settled predictions.
+Outcome inference: resolve the ticker → (strike/bracket, true close_time). If a
+Coinbase candle exists within ±2 min of the close, decide YES/NO. Calibration
+is computed over the most recent `window` *settled* predictions.
+
+Two correctness requirements (both were bugs in the original implementation):
+  1. Scan ALL estimates, not just the most-recent slice — the recent rows are
+     all still-open markets, so a recency-limited scan never settles anything.
+  2. Use the contract's TRUE anchored close time (settlement_mode), not the
+     now-relative fallback, or historical markets settle at the wrong time.
 """
 from __future__ import annotations
+
+from bisect import bisect_left
 
 from src.measurement.calibration import compute
 from src.monitoring.logging import get_logger
@@ -16,33 +24,50 @@ from src.storage.repository import Repository
 
 logger = get_logger("measurement.reporter")
 
+_SETTLE_TOLERANCE_MS = 2 * 60_000
+
+
+def _nearest_close(close_ms: int, cand_ts: list[int], cand_close: list[float]) -> float | None:
+    """Coinbase close nearest to close_ms, or None if none within tolerance."""
+    if not cand_ts:
+        return None
+    i = bisect_left(cand_ts, close_ms)
+    best_idx, best_diff = None, None
+    for j in (i - 1, i, i + 1):
+        if 0 <= j < len(cand_ts):
+            d = abs(cand_ts[j] - close_ms)
+            if best_diff is None or d < best_diff:
+                best_idx, best_diff = j, d
+    if best_idx is None or best_diff > _SETTLE_TOLERANCE_MS:
+        return None
+    return cand_close[best_idx]
+
 
 def settle_and_snapshot(repo: Repository, window: int = 500, n_bins: int = 10) -> dict | None:
-    """Walks recent prob_estimates, infers outcomes, writes a calibration snapshot.
+    """Walk all prob_estimates, settle the ones whose markets have closed,
+    write a calibration snapshot over the most recent `window` settled pairs.
 
-    Returns the report dict on success, or None if there's nothing to score yet.
+    Returns the report dict on success, or None if nothing is settleable yet.
     """
-    estimates = repo.recent_prob_estimates(limit=window * 4)
+    estimates = repo.prob_estimates_for_settlement()
     candles = repo.recent_candles(limit=10_000)
     if not estimates or not candles:
         return None
 
     candles_by_ts = sorted(candles, key=lambda c: c["timestamp_ms"])
+    cand_ts = [int(c["timestamp_ms"]) for c in candles_by_ts]
+    cand_close = [float(c["close"]) for c in candles_by_ts]
 
     pairs: list[tuple[float, int]] = []
     for e in estimates:
-        terms = parse_ticker(e["market_id"])
+        # settlement_mode=True → contract's real anchored close, not now-relative.
+        terms = parse_ticker(e["market_id"], settlement_mode=True)
         if terms is None:
             continue
         close_ms = int(terms.close_time.timestamp() * 1000)
-        # Has the market actually closed yet (relative to our candle history)?
-        if not candles_by_ts or candles_by_ts[-1]["timestamp_ms"] < close_ms:
+        settle_price = _nearest_close(close_ms, cand_ts, cand_close)
+        if settle_price is None:
             continue
-        # Find the candle closest to close_time (within ±2 minutes).
-        nearest = min(candles_by_ts, key=lambda c: abs(c["timestamp_ms"] - close_ms))
-        if abs(nearest["timestamp_ms"] - close_ms) > 2 * 60_000:
-            continue
-        settle_price = float(nearest["close"])
         if terms.direction == "above":
             if terms.strike_usd is None:
                 continue
@@ -52,11 +77,12 @@ def settle_and_snapshot(repo: Repository, window: int = 500, n_bins: int = 10) -
                 continue
             outcome = 1 if (terms.bracket_low_usd <= settle_price < terms.bracket_high_usd) else 0
         pairs.append((float(e["prob"]), outcome))
-        if len(pairs) >= window:
-            break
 
     if not pairs:
         return None
+
+    # Most recent `window` settled predictions (estimates were oldest-first).
+    pairs = pairs[-window:]
 
     report = compute(pairs, n_bins=n_bins)
     repo.save_calibration(
