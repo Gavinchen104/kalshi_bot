@@ -43,8 +43,16 @@ def parse_ticker(
     market_id: str,
     now: datetime | None = None,
     bracket_width_usd: float = 250.0,
+    settlement_mode: bool = False,
 ) -> ContractTerms | None:
-    """Parse a Kalshi BTC ticker. Returns None if the ticker isn't recognizable."""
+    """Parse a Kalshi BTC ticker. Returns None if the ticker isn't recognizable.
+
+    When ``settlement_mode`` is True, ``close_time`` is always the contract's
+    true anchored close (from the ticker's YY/MMM/DD/HH), regardless of ``now``.
+    This is required for settling historical markets: the default,
+    ``now``-relative behavior incorrectly maps an already-closed contract to the
+    next 15-minute boundary from *now*. Live pricing keeps the default.
+    """
     if now is None:
         now = datetime.now(tz=timezone.utc)
 
@@ -69,7 +77,10 @@ def parse_ticker(
     except ValueError:
         return None
 
-    close_time = anchor if anchor >= now else next_quarter_boundary(now)
+    if settlement_mode:
+        close_time = anchor
+    else:
+        close_time = anchor if anchor >= now else next_quarter_boundary(now)
 
     kind = m.group("kind").upper()
     if kind == "T":
@@ -87,6 +98,17 @@ def parse_ticker(
         bracket_low_usd=strike_field,
         bracket_high_usd=strike_field + bracket_width_usd,
     )
+
+
+def resolve_close_time(market_id: str, bracket_width_usd: float = 250.0) -> datetime | None:
+    """Return a contract's true anchored close time, for settlement code.
+
+    Thin wrapper over ``parse_ticker(..., settlement_mode=True)`` so callers
+    (reporter, backtest) cannot accidentally get the ``now``-relative close.
+    Returns None if the ticker is unrecognizable.
+    """
+    terms = parse_ticker(market_id, bracket_width_usd=bracket_width_usd, settlement_mode=True)
+    return terms.close_time if terms is not None else None
 
 
 def fallback_close_time(now: datetime | None = None) -> datetime:
