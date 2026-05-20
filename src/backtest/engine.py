@@ -235,6 +235,13 @@ def run_backtest(
         # ── Re-price (B3 / T16): recompute prob with the candle history
         # available at this estimate's computed_at, under the chosen vol_mode.
         # Replay mode just uses the stored prob (Phase-1 behavior).
+        #
+        # Critical: Phase-1 stored estimates were priced against parse_ticker's
+        # now-relative close_time, so settlement_mode `terms.close_time` is often
+        # in the past relative to `computed_at`. To reprice faithfully we use the
+        # bot's live perspective: close_time_eff = computed_at + stored
+        # horizon_seconds, with the ticker's strike/bracket. Outcome settlement
+        # still uses the ticker anchor — that's what actually happened.
         if repricer_mode == "reprice":
             now_ms = _parse_iso_ms(e["computed_at"])
             if now_ms is None:
@@ -247,12 +254,16 @@ def run_backtest(
                 continue
             closes_view = closes_arr[:i]
             now_dt = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+            from dataclasses import replace as _dc_replace
+            from datetime import timedelta as _td
+            effective_close = now_dt + _td(seconds=float(e["horizon_seconds"]))
+            terms_for_reprice = _dc_replace(terms, close_time=effective_close)
             est_re = pricer.price(
                 market_id=e["market_id"],
                 spot_usd=float(e["spot_usd"]),
                 closes_1m=closes_view,
                 now=now_dt,
-                terms_override=terms,
+                terms_override=terms_for_reprice,
             )
             if est_re is None:
                 n_reprice_skipped += 1
