@@ -1,6 +1,6 @@
 # Phase 3 Plan — Post-GATE-A: Path to Live, or Pivot
 
-_Status: draft · Entry-gated on Phase 2 GATE A · Created during the Commit-A review_
+_Status: 🔄 Track B active (Phase 2 GATE A FAIL) · B1 mini-gate PASS (2026-05-20, brittle on tail) · Next: A1 basis study_
 
 ---
 
@@ -29,6 +29,52 @@ CROSS-CUTTING (X1–X3) runs regardless of branch.
 
 GATE A pass bar (from Phase 2 §2): `0.00–0.10` bin empirical < 0.02, overall
 log loss < 0.69, no reliability bin off by > 0.07, settleable n ≥ 20,000.
+
+**Phase 2 GATE A result (2026-05-20): ❌ FAIL.** All five vol modes (replay,
+fixed, horizon_scaled, blend, ewma) missed by wide margins (log loss ≥ 1.25
+vs 0.69 bar; tail bin emp ≈ 0.096 vs 0.02 bar). Full per-mode breakdown in
+[PHASE2_PLAN.md §2.1](PHASE2_PLAN.md#21-gate-a-results-2026-05-20).
+**Branch taken: TRACK B (pivot).**
+
+---
+
+## 2.1 Track B Mini-Gate Results
+
+### B1 — Empirical calibration layer · _2026-05-20_
+
+`python -m src.backtest.engine --mini-gate-b1` (43,635 settled pairs,
+time-series 80/20 split, no shuffle, no look-ahead).
+
+| Metric | Raw (OOS) | Calibrated (OOS) | Bar |
+|---|---:|---:|:--|
+| Log loss | 1.6942 | **0.2658** | < 0.69 ✅ |
+| Tail-bin emp (0.0–0.1) | 0.1241 | **0.0192** | < 0.02 ✅ |
+| Brier | 0.1030 | 0.0777 | lower better |
+
+**Mini-gate per plan letter: ✅ PASS.**
+
+**Robustness audit (4-fold expanding-window CV):**
+
+| fold | train n | test n | cal log loss | cal tail emp | pass? |
+|---:|---:|---:|---:|---:|:-:|
+| 1 | 8,727 | 8,727 | 0.27 | 0.072 | ❌ |
+| 2 | 17,454 | 8,727 | 0.24 | 0.016 | ✅ |
+| 3 | 26,181 | 8,727 | 0.41 | 0.056 | ❌ |
+| 4 | 34,908 | 8,727 | 0.27 | 0.019 | ✅ |
+
+- **Log loss criterion is robust** (< 0.69 across all 4 folds; 0.24–0.41).
+- **Tail-bin criterion is brittle** (passes 2/4 folds). The dataset isn't
+  homogeneous; calibration on Phase-1 data has time-varying tightness.
+
+**Decision:** record B1 as PASS per the plan as written; do **not** treat it
+as a green light. The forward GATE B (live calibration over ≥5 continuous
+days) is the binding test that resolves the multi-fold concern. The B1
+mapping is genuinely informative (log loss dropped from 1.69 → 0.27 OOS) but
+the tail criterion needs forward confirmation, not backward overfit.
+
+**Next:** rejoin Track A at **A1 (resolution-source basis study)**. Implementation
+will produce + persist the calibrator artifact and wire it into the live
+strategy so GATE B exercises the same calibrated path.
 
 ---
 

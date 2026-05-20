@@ -32,12 +32,17 @@ threshold, tail-bin empirical 0.096 vs the 0.02 threshold. Full per-mode
 breakdown in [PHASE2_PLAN.md §2.1](PHASE2_PLAN.md). Realized-vol-only Black–
 Scholes does not pass calibration for these contracts.
 
-**Active work: Phase 3 Track B (pivot).** Per the plan, the cheapest viable
-pivot is run first: **B1 — empirical calibration layer** (isotonic / Platt
-mapping from raw BS prob → calibrated prob, fit on settled history with
-time-series cross-validation). If B1 misses its mini-gate, **B2 — Deribit
-option-implied volatility**. If both miss, **B3 — reframe or abandon** is a
-hard stop, not a "keep tweaking."
+**Active work: Phase 3 Track B (pivot).** **B1 — empirical calibration
+layer**: mini-gate PASS (2026-05-20). Isotonic regression on raw BS-probs
+drops OOS log loss from 1.69 → 0.27 and tail-bin emp from 0.124 → 0.019
+(80/20 time-series split, no look-ahead). Multi-fold CV shows the tail
+criterion is brittle (2/4 folds pass) — log loss criterion is solid — so
+B1 is a *tentative* pass; the binding test is GATE B forward validation.
+
+**Next:** rejoin Track A at **A1 (resolution-source basis study)**, ship a
+calibrator artifact into the live strategy, then advance through GATE B
+(forward paper, ≥5 days continuous) and GATE C (tiny-size live with human
+sign-off).
 
 ---
 

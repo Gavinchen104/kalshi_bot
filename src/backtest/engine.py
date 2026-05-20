@@ -657,6 +657,111 @@ def run_gate_a(db_path: str, settings) -> int:
     return rc
 
 
+def _collect_settled_pairs(db_path: str, settings) -> tuple[np.ndarray, np.ndarray]:
+    """Run the settlement loop once with replay (stored probs) and return
+    (raw_probs, outcomes) for every settleable estimate, in time order.
+    Reuses the engine's settlement logic verbatim — no look-ahead."""
+    res = run_backtest(
+        db_path, settings,
+        repricer_mode="replay", vol_mode=None, execution_mode="one-entry",
+    )
+    rep = res["calibration"]
+    # `compute()` doesn't return the raw pair list; rebuild it cheaply by
+    # walking the loop again. Cheap vs. the fitting we'll do next.
+    import sqlite3
+    from src.strategy.calibrator import IsotonicCalibrator  # noqa: F401 (sentinel)
+    bracket_w = settings.pricer.bracket_width_usd_default
+    conn = sqlite3.connect(db_path)
+    try:
+        estimates = _load_estimates(conn)
+        cand_ts, cand_close = _load_candles(conn)
+    finally:
+        conn.close()
+    pairs: list[tuple[float, int]] = []
+    for e in estimates:
+        terms = parse_ticker(e["market_id"], now=_EPOCH, bracket_width_usd=bracket_w)
+        if terms is None:
+            continue
+        close_ms = int(terms.close_time.timestamp() * 1000)
+        sp = _settle_price(close_ms, cand_ts, cand_close)
+        if sp is None:
+            continue
+        out = _outcome(terms, sp)
+        if out is None:
+            continue
+        pairs.append((float(e["prob"]), out))
+    raw = np.fromiter((p for p, _ in pairs), dtype=float, count=len(pairs))
+    y = np.fromiter((o for _, o in pairs), dtype=float, count=len(pairs))
+    _ = rep  # for symmetry; not used here
+    return raw, y
+
+
+def run_mini_gate_b1(db_path: str, settings) -> int:
+    """Phase 3 / Track B / B1 mini-gate.
+
+    Fit an isotonic calibrator on the earlier 80% of settled (raw_prob,
+    outcome) pairs in time order; score on the last 20%. Strict time-series
+    CV — no shuffle, no look-ahead. PASS iff OOS log loss < 0.69 AND the
+    calibrated-prob 0.0–0.1 bin's empirical YES freq < 0.02. Returns 0 on
+    PASS (suitable for CI gating)."""
+    from src.measurement.calibration import compute as _compute_calib
+    from src.strategy.calibrator import IsotonicCalibrator, time_series_split
+
+    print("=" * 78)
+    print("MINI-GATE B1 — empirical calibration layer (Phase 3 Track B)")
+    print("=" * 78)
+
+    raw, y = _collect_settled_pairs(db_path, settings)
+    n = raw.size
+    print(f"\n  settled pairs: {n:,}  (time-ordered)")
+    if n < 100:
+        print("  too few settled pairs to meaningfully fit/score")
+        print("=" * 78)
+        return 1
+
+    tr, te = time_series_split(n, train_frac=0.8)
+    cal = IsotonicCalibrator().fit(raw[tr], y[tr])
+    p_cal_oos = cal.predict(raw[te])
+    y_oos = y[te]
+
+    rep_raw = _compute_calib(list(zip(raw[te].tolist(), y_oos.astype(int).tolist())), n_bins=10)
+    rep_cal = _compute_calib(list(zip(p_cal_oos.tolist(), y_oos.astype(int).tolist())), n_bins=10)
+
+    def _tail(rep) -> float | None:
+        for b in rep.bins:
+            if b["lo"] == 0.0 and b["hi"] == 0.1 and b["emp_freq"] is not None:
+                return b["emp_freq"]
+        return None
+
+    raw_ll, cal_ll = rep_raw.log_loss, rep_cal.log_loss
+    raw_tail, cal_tail = _tail(rep_raw), _tail(rep_cal)
+
+    print(f"\n  {'metric':<22}{'raw (OOS)':>14}{'calibrated (OOS)':>22}{'bar':>10}")
+    print("  " + "-" * 66)
+    print(f"  {'log loss':<22}{raw_ll:>14.4f}{cal_ll:>22.4f}{'< 0.69':>10}")
+    rt = f"{raw_tail:.4f}" if raw_tail is not None else "—"
+    ct = f"{cal_tail:.4f}" if cal_tail is not None else "—"
+    print(f"  {'tail bin emp (0-0.1)':<22}{rt:>14}{ct:>22}{'< 0.02':>10}")
+    print(f"  {'brier':<22}{rep_raw.brier:>14.4f}{rep_cal.brier:>22.4f}{'(lower better)':>10}")
+
+    ll_pass = cal_ll is not None and cal_ll < 0.69
+    tail_pass = cal_tail is not None and cal_tail < 0.02
+    passes = ll_pass and tail_pass
+    print("\n  ──────────────────────────────────────────────────────────────")
+    print(f"  log loss < 0.69  : {'PASS' if ll_pass else 'FAIL'}")
+    print(f"  tail emp < 0.02  : {'PASS' if tail_pass else 'FAIL'}")
+    if passes:
+        print(f"\n  MINI-GATE B1: ✅ PASS  → calibration layer is viable")
+        print(f"  → Rejoin Phase 3 Track A at A1 (basis study) with calibrated probs")
+        rc = 0
+    else:
+        print(f"\n  MINI-GATE B1: ❌ FAIL  → escalate to B2 (Deribit IV)")
+        print(f"  Per PHASE3_PLAN.md §4: if B1 misses, attempt B2; if B2 misses, B3 hard stop.")
+        rc = 1
+    print("=" * 78)
+    return rc
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Replay-backtest Strategy 2.")
     ap.add_argument("--db", default=None, help="SQLite DB path (default: from settings)")
@@ -680,6 +785,11 @@ def main() -> None:
         help="Run the full Phase-2 GATE A sweep: replay baseline + each reprice "
              "vol_mode, side-by-side summary, exit code 1 if no mode passes.",
     )
+    ap.add_argument(
+        "--mini-gate-b1", action="store_true",
+        help="Run Phase-3 B1 mini-gate: fit isotonic calibrator on the earlier "
+             "80%% of settled pairs, score on the last 20%%, exit code 1 on FAIL.",
+    )
     args = ap.parse_args()
 
     settings = load_settings()
@@ -688,6 +798,9 @@ def main() -> None:
     if args.gate_a:
         import sys as _sys
         _sys.exit(run_gate_a(db_path, settings))
+    if args.mini_gate_b1:
+        import sys as _sys
+        _sys.exit(run_mini_gate_b1(db_path, settings))
 
     res = run_backtest(
         db_path, settings,
