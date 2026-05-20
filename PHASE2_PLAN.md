@@ -1,6 +1,6 @@
 # Phase 2 Plan — Strategy 2 Remediation & Validation
 
-_Status: draft · Owner: trading bot · Created during the Phase 1 post-mortem_
+_Status: ✅ Complete · Outcome: **GATE A FAIL** (2026-05-20) · Next: Phase 3 Track B (pivot)_
 
 ---
 
@@ -55,6 +55,44 @@ Re-running `python -m src.backtest.engine` after the vol fix must show:
 - Settleable sample size **≥ 20,000** (requires WS3 data fix)
 
 If GATE A fails after WS1 + reasonable tuning → invoke the pivot options in §5.
+
+---
+
+## 2.1 GATE A Results _(2026-05-20)_
+
+Run via `python -m src.backtest.engine --gate-a` on `data/bot.db`
+(43,635 settleable estimates, the same population as the Phase 1 baseline).
+
+| Mode               | settle n | Brier | Log loss | Tail emp (0.0–0.1) | Max bin gap | Monotone | GATE A |
+|--------------------|---------:|------:|---------:|-------------------:|------------:|---------:|:------:|
+| replay (Phase 1)   |  43,635  | 0.079 | **1.280**| **0.096**          | 0.158       | FAIL     | ❌ FAIL |
+| reprice/fixed      |  43,635  | 0.078 | **1.251**| **0.096**          | 0.124       | FAIL     | ❌ FAIL |
+| reprice/horizon    |  43,635  | 0.078 | **1.251**| **0.096**          | 0.124       | FAIL     | ❌ FAIL |
+| reprice/blend      |  43,635  | 0.079 | **1.282**| **0.096**          | 0.215       | FAIL     | ❌ FAIL |
+| reprice/ewma       |  43,635  | 0.079 | **1.270**| **0.096**          | 0.190       | FAIL     | ❌ FAIL |
+
+Bar (for reference): log loss < 0.69, tail emp < 0.02, max bin gap ≤ 0.07,
+settleable n ≥ 20,000. The settleable-n criterion passes; **every other
+criterion fails by a wide margin in every mode.**
+
+**Why the four vol modes are near-identical on this data:** Phase 1's stored
+`horizon_seconds` were all in the minute-scale (a side effect of the
+now-relative `parse_ticker` bug fixed in T01). With short stored horizons,
+`horizon_scaled` clamps to the floor window (≈ `fixed`), and `blend`/`ewma`
+also fall back toward short-window behavior. So this sweep does **not**
+discriminate vol modes on horizon — it tells us that even with the floor,
+blend, and EWMA refinements, the realized-vol-into-BS premise misses the
+calibration bar at the same place the Phase 1 baseline did.
+
+**Decision:** **GATE A FAIL.** Proceed to **Phase 3 Track B (pivot).** Plan
+prescribes B1 (empirical calibration layer — cheapest) first, then B2
+(Deribit IV) if insufficient, then B3 (reframe/abandon) as the hard stop.
+
+The unanimous failure across realized-vol-only modes is itself a finding: the
+edge isn't in *which* realized window you average, it's that realized vol
+alone is the wrong input. The B1 calibration layer keeps BS as a feature; B2
+swaps the input for option-implied vol. Both are anticipated by the plan and
+do not require revisiting Phase 2.
 
 ---
 

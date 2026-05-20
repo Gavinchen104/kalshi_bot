@@ -394,6 +394,76 @@ def _decile_table(trades: list[Trade]) -> list[dict]:
     return out
 
 
+def _monotonicity_check(deciles: list[dict]) -> dict:
+    """Test whether avg PnL/contract rises across edge deciles — the
+    discriminating sign that the predicted edge is *real* and not noise.
+
+    Returns: {"rising_steps": int (out of 9), "spread_cents": float,
+              "passes": bool, "note": str}.
+    Pass criteria: rising_steps >= 7 (out of 9 adjacent comparisons)
+                   AND spread_cents (top decile vs bottom) >= 2.0.
+    Requires at least 5 populated deciles to be meaningful.
+    """
+    pops = [d for d in deciles if d["n"] > 0]
+    if len(pops) < 5:
+        return {"rising_steps": 0, "spread_cents": 0.0, "passes": False,
+                "note": f"insufficient populated deciles ({len(pops)} < 5)"}
+    pnl = [d["avg_pnl_per_contract"] for d in pops]
+    rising = sum(1 for a, b in zip(pnl, pnl[1:]) if b > a)
+    spread = pnl[-1] - pnl[0]
+    passes = rising >= 7 and spread >= 2.0
+    return {
+        "rising_steps": rising, "spread_cents": float(spread),
+        "passes": passes,
+        "note": f"rising {rising}/{len(pops)-1} · spread {spread:+.2f}c",
+    }
+
+
+def _gate_a_check(res: dict) -> dict:
+    """Evaluate Phase 2 GATE A criteria against a backtest result dict.
+
+    Bar (from PHASE2_PLAN.md §2):
+      - 0.00-0.10 predicted bin: empirical YES < 0.02 (vs 0.096 baseline)
+      - log loss < 0.69 (beats coin flip; vs 1.28 baseline)
+      - no reliability bin off by > 0.07 abs (mean_pred vs emp_freq)
+      - settleable n >= 20,000
+    """
+    rep = res.get("calibration")
+    settleable = res.get("n_settleable", 0)
+    crit: dict = {
+        "settleable_n_ok": settleable >= 20_000,
+        "settleable_n": settleable,
+    }
+    if rep is None or rep.n_samples == 0:
+        crit.update({
+            "log_loss_ok": False, "log_loss": None,
+            "tail_bin_ok": False, "tail_emp": None,
+            "max_bin_gap_ok": False, "max_bin_gap": None,
+            "passes": False,
+        })
+        return crit
+    crit["log_loss"] = rep.log_loss
+    crit["log_loss_ok"] = rep.log_loss is not None and rep.log_loss < 0.69
+    tail_bin = next((b for b in rep.bins if b["lo"] == 0.0 and b["hi"] == 0.1), None)
+    crit["tail_emp"] = tail_bin["emp_freq"] if tail_bin else None
+    crit["tail_bin_ok"] = (
+        tail_bin is not None and tail_bin["emp_freq"] is not None
+        and tail_bin["emp_freq"] < 0.02
+    )
+    gaps = [
+        abs(b["emp_freq"] - b["mean_pred"])
+        for b in rep.bins
+        if b["n"] > 0 and b["mean_pred"] is not None and b["emp_freq"] is not None
+    ]
+    crit["max_bin_gap"] = max(gaps) if gaps else None
+    crit["max_bin_gap_ok"] = bool(gaps) and max(gaps) <= 0.07
+    crit["passes"] = (
+        crit["settleable_n_ok"] and crit["log_loss_ok"]
+        and crit["tail_bin_ok"] and crit["max_bin_gap_ok"]
+    )
+    return crit
+
+
 def _group_pnl(trades: list[Trade], keyfn) -> dict:
     agg: dict = defaultdict(lambda: {"n": 0, "pnl": 0, "wins": 0})
     for t in trades:
@@ -503,7 +573,88 @@ def print_report(res: dict) -> None:
     for k, a in sorted(_group_pnl(trades, hbucket).items(), key=lambda kv: order.get(kv[0], 9)):
         print(f"  {k:>6}  n={a['n']:>4}  win={100*a['wins']/max(1,a['n']):>5.1f}%  "
               f"net=${a['pnl']/100:>9.2f}")
+
+    # ── Monotonicity check (T18): is realized PnL monotone in predicted edge? ─
+    mono = _monotonicity_check(_decile_table(trades))
+    print("\n── EDGE-DECILE MONOTONICITY ────────────────────────────────────")
+    print(f"  rising_steps={mono['rising_steps']}  spread={mono['spread_cents']:+.2f}c"
+          f"  →  {'PASS' if mono['passes'] else 'FAIL'}  ({mono['note']})")
+
+    # ── GATE A check (T18): Phase 2 binding decision ─────────────────────────
+    gate = _gate_a_check(res)
+    print("\n── GATE A (Phase 2 binding decision) ───────────────────────────")
+    print(f"  settleable n     : {gate['settleable_n']:,}     "
+          f"{'PASS' if gate['settleable_n_ok'] else 'FAIL'}  (≥20,000)")
+    ll = f"{gate['log_loss']:.4f}" if gate['log_loss'] is not None else "—"
+    print(f"  log loss         : {ll}    "
+          f"{'PASS' if gate['log_loss_ok'] else 'FAIL'}  (<0.69)")
+    te = f"{gate['tail_emp']:.4f}" if gate['tail_emp'] is not None else "—"
+    print(f"  tail bin emp     : {te}    "
+          f"{'PASS' if gate['tail_bin_ok'] else 'FAIL'}  (<0.02)")
+    mg = f"{gate['max_bin_gap']:.3f}" if gate['max_bin_gap'] is not None else "—"
+    print(f"  max bin gap      : {mg}     "
+          f"{'PASS' if gate['max_bin_gap_ok'] else 'FAIL'}  (≤0.07)")
+    print(f"  ────────────────────────  GATE A: "
+          f"{'✅ PASS' if gate['passes'] else '❌ FAIL'}")
     print("=" * 72)
+
+
+_GATE_A_MODES = (
+    ("replay", "replay", None),
+    ("reprice/fixed", "reprice", "fixed"),
+    ("reprice/horizon", "reprice", "horizon_scaled"),
+    ("reprice/blend", "reprice", "blend"),
+    ("reprice/ewma", "reprice", "ewma"),
+)
+
+
+def run_gate_a(db_path: str, settings) -> int:
+    """Run the backtest across the replay baseline + each reprice vol_mode and
+    print a side-by-side GATE A summary. Returns 0 if ANY mode passes, else 1
+    (suitable for CI gating)."""
+    print("=" * 78)
+    print("GATE A SWEEP — Phase 2 binding decision across vol modes")
+    print("=" * 78)
+
+    rows: list[dict] = []
+    for label, rep_mode, vol_mode in _GATE_A_MODES:
+        res = run_backtest(
+            db_path, settings,
+            repricer_mode=rep_mode, vol_mode=vol_mode,
+            execution_mode="one-entry",
+        )
+        mono = _monotonicity_check(_decile_table(res["trades"]))
+        gate = _gate_a_check(res)
+        rows.append({"label": label, "res": res, "mono": mono, "gate": gate})
+
+    # Header
+    print(f"\n  {'mode':<18} {'settle_n':>9} {'brier':>7} {'logloss':>8} "
+          f"{'tail_emp':>9} {'maxgap':>7} {'mono':>6} {'GATE A':>9}")
+    print("  " + "-" * 76)
+    for r in rows:
+        rep = r["res"]["calibration"]
+        ll = f"{rep.log_loss:.3f}" if rep.n_samples else "—"
+        br = f"{rep.brier:.3f}" if rep.n_samples else "—"
+        te = f"{r['gate']['tail_emp']:.3f}" if r['gate']['tail_emp'] is not None else "—"
+        mg = f"{r['gate']['max_bin_gap']:.3f}" if r['gate']['max_bin_gap'] is not None else "—"
+        print(f"  {r['label']:<18} {r['res']['n_settleable']:>9,} "
+              f"{br:>7} {ll:>8} {te:>9} {mg:>7} "
+              f"{'PASS' if r['mono']['passes'] else 'FAIL':>6} "
+              f"{'✅ PASS' if r['gate']['passes'] else '❌ FAIL':>9}")
+
+    any_pass = any(r["gate"]["passes"] for r in rows)
+    print("\n  ──────────────────────────────────────────────────────────────")
+    if any_pass:
+        winners = [r["label"] for r in rows if r["gate"]["passes"]]
+        print(f"  GATE A: ✅ PASS  ({', '.join(winners)})")
+        print(f"  → Proceed to Phase 3 Track A (forward paper validation → GATE B)")
+        rc = 0
+    else:
+        print(f"  GATE A: ❌ FAIL  (no vol mode meets the bar)")
+        print(f"  → Proceed to Phase 3 Track B (pivot: P1 Deribit IV / P2 calibration layer)")
+        rc = 1
+    print("=" * 78)
+    return rc
 
 
 def main() -> None:
@@ -524,10 +675,20 @@ def main() -> None:
         help="one-entry = one trade per unique market (Phase 1 default); "
              "faithful = honor live rate-limit + per-market + gross-exposure caps",
     )
+    ap.add_argument(
+        "--gate-a", action="store_true",
+        help="Run the full Phase-2 GATE A sweep: replay baseline + each reprice "
+             "vol_mode, side-by-side summary, exit code 1 if no mode passes.",
+    )
     args = ap.parse_args()
 
     settings = load_settings()
     db_path = args.db or settings.storage.db_path
+
+    if args.gate_a:
+        import sys as _sys
+        _sys.exit(run_gate_a(db_path, settings))
+
     res = run_backtest(
         db_path, settings,
         repricer_mode=args.repricer_mode,
