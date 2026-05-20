@@ -179,6 +179,8 @@ async def run() -> None:
         vol_mode=settings.pricer.vol_mode,
         vol_window_floor_min=settings.pricer.vol_window_floor_min,
         vol_window_cap_min=settings.pricer.vol_window_cap_min,
+        vol_long_floor_days=settings.pricer.vol_long_floor_days,
+        ewma_half_life_min=settings.pricer.ewma_half_life_min,
     )
     strategy = EdgeStrategy(settings.strategy)
     kill = KillSwitch()

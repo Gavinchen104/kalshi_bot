@@ -21,11 +21,13 @@ pricer:
   vol_floor_annualized: 0.20
   vol_ceiling_annualized: 3.00
   min_horizon_seconds: 5
-  # vol_mode: "fixed" (Phase 1 baseline) | "horizon_scaled" (Phase 2 Commit B)
-  # | "blend" | "ewma" (added in B2). Default stays "fixed" for A/B parity.
+  # vol_mode: "fixed" (Phase 1 baseline) | "horizon_scaled" | "blend" | "ewma".
+  # Default stays "fixed" for A/B parity; backtest --vol-mode lets you compare.
   vol_mode: fixed
   vol_window_floor_min: 60
   vol_window_cap_min: 1440
+  vol_long_floor_days: 0       # >0 enables trailing N-day vol floor (W1.4)
+  ewma_half_life_min: null     # null = horizon-tuned (~horizon/4, clamped)
   # Default bracket width for KXBTC-*-B<low> markets (15-min). Active series
   # are mostly $250; some use $500. Phase 2 should infer per-series via Kalshi REST.
   bracket_width_usd_default: 250.0

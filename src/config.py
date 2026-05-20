@@ -58,6 +58,12 @@ class PricerConfig(BaseModel):
     # Horizon-scaled mode clamps the lookback window to [floor, cap] minutes.
     vol_window_floor_min: int = 60
     vol_window_cap_min: int = 1440
+    # Long-window vol floor (Phase 2 W1.4): if > 0, the final sigma is
+    # max(estimator_sigma, trailing N-day realized vol). 0 disables (default,
+    # preserves Phase 1 behavior). 7 = one week of 1-min closes.
+    vol_long_floor_days: int = 0
+    # Optional EWMA half-life override in minutes. None → horizon-tuned default.
+    ewma_half_life_min: int | None = None
 
 
 class StrategyConfig(BaseModel):

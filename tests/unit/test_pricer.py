@@ -159,6 +159,66 @@ def test_pricer_horizon_scaled_uses_longer_window_for_long_horizon():
     assert scaled_est.prob != fixed_est.prob
 
 
+def test_pricer_blend_mode_returns_valid_estimate():
+    now = datetime(2026, 5, 14, 12, 0, 0, tzinfo=timezone.utc)
+    terms = ContractTerms(
+        market_id="KXBTCD-26MAY1512-T80000",
+        close_time=now + timedelta(hours=24),
+        direction="above", strike_usd=80_000.0,
+    )
+    rng = np.random.default_rng(13)
+    closes = 80_000 + np.cumsum(rng.normal(0.0, 30.0, 2000))
+    pricer = CoinbasePricer(vol_mode="blend", min_horizon_seconds=5)
+    est = pricer.price(terms.market_id, 80_000, closes,
+                       now=now, terms_override=terms)
+    assert est is not None
+    assert 0.0 < est.prob < 1.0
+    assert est.vol_annualized > 0
+
+
+def test_pricer_ewma_mode_returns_valid_estimate():
+    now = datetime(2026, 5, 14, 12, 0, 0, tzinfo=timezone.utc)
+    terms = ContractTerms(
+        market_id="KXBTCD-26MAY1512-T80000",
+        close_time=now + timedelta(hours=12),
+        direction="above", strike_usd=80_000.0,
+    )
+    rng = np.random.default_rng(17)
+    closes = 80_000 + np.cumsum(rng.normal(0.0, 25.0, 1500))
+    pricer = CoinbasePricer(vol_mode="ewma", min_horizon_seconds=5)
+    est = pricer.price(terms.market_id, 80_000, closes,
+                       now=now, terms_override=terms)
+    assert est is not None
+    assert 0.0 < est.prob < 1.0
+
+
+def test_pricer_long_window_floor_binds_when_short_window_is_calm():
+    """The exact Phase-1 failure mode: a calm tail makes the short window
+    understate vol; the 7-day floor lifts it back to the truthful estimate."""
+    rng = np.random.default_rng(23)
+    noisy = rng.normal(0.0, 60.0, 8 * 24 * 60 - 60)
+    calm_tail = rng.normal(0.0, 1.0, 60)
+    closes = 80_000 + np.cumsum(np.concatenate([noisy, calm_tail]))
+
+    now = datetime(2026, 5, 14, 12, 0, 0, tzinfo=timezone.utc)
+    terms = ContractTerms(
+        market_id="KXBTCD-26MAY1512-T80000",
+        close_time=now + timedelta(hours=12),
+        direction="above", strike_usd=80_000.0,
+    )
+
+    no_floor = CoinbasePricer(vol_window_minutes=60, vol_mode="fixed",
+                              vol_long_floor_days=0).price(
+        terms.market_id, 80_000, closes, now=now, terms_override=terms,
+    )
+    with_floor = CoinbasePricer(vol_window_minutes=60, vol_mode="fixed",
+                                vol_long_floor_days=7).price(
+        terms.market_id, 80_000, closes, now=now, terms_override=terms,
+    )
+    assert no_floor is not None and with_floor is not None
+    assert with_floor.vol_annualized > no_floor.vol_annualized
+
+
 def test_pricer_handles_bracket_market_via_terms_override():
     now = datetime(2026, 5, 14, 12, 0, 0, tzinfo=timezone.utc)
     terms = ContractTerms(

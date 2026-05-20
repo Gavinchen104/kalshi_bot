@@ -23,16 +23,19 @@ from scipy.stats import norm
 from src.pricing.ticker import parse_ticker
 from src.pricing.volatility import (
     MINUTES_PER_YEAR,
+    blend_vol,
     clamp_vol,
     close_to_close_vol,
+    ewma_vol,
     horizon_matched_vol,
+    long_window_floor_vol,
 )
 from src.types import ContractTerms, ProbEstimate
 
 
-# Vol-mode dispatch table; B2 adds "blend" and "ewma". "fixed" is the Phase 1
-# baseline and remains the default so each mode change is A/B-comparable.
-SUPPORTED_VOL_MODES = ("fixed", "horizon_scaled")
+# Vol-mode dispatch table. "fixed" is the Phase 1 baseline and remains the
+# default so each mode change is A/B-comparable on the same data.
+SUPPORTED_VOL_MODES = ("fixed", "horizon_scaled", "blend", "ewma")
 
 
 def _d2(spot_usd: float, strike_usd: float, sigma_annualized: float, T_years: float) -> float:
@@ -87,6 +90,8 @@ class CoinbasePricer:
         vol_mode: str = "fixed",
         vol_window_floor_min: int = 60,
         vol_window_cap_min: int = 1440,
+        vol_long_floor_days: int = 0,
+        ewma_half_life_min: int | None = None,
     ) -> None:
         if vol_mode not in SUPPORTED_VOL_MODES:
             raise ValueError(
@@ -100,18 +105,37 @@ class CoinbasePricer:
         self.vol_mode = vol_mode
         self.vol_window_floor_min = vol_window_floor_min
         self.vol_window_cap_min = vol_window_cap_min
+        self.vol_long_floor_days = vol_long_floor_days
+        self.ewma_half_life_min = ewma_half_life_min
 
     def _estimate_vol(self, closes_1m, horizon_seconds: float) -> float | None:
-        """Dispatch to the selected vol estimator. 'fixed' is bit-identical to
-        the Phase 1 path (close_to_close_vol over self.vol_window_minutes)."""
+        """Dispatch to the selected vol estimator, then (optionally) apply the
+        trailing long-window floor. 'fixed' is bit-identical to the Phase 1
+        path when vol_long_floor_days == 0 (the default)."""
         if self.vol_mode == "horizon_scaled":
-            return horizon_matched_vol(
+            sigma = horizon_matched_vol(
                 closes_1m, horizon_seconds=horizon_seconds,
                 floor_min=self.vol_window_floor_min,
                 cap_min=self.vol_window_cap_min,
             )
-        # default / "fixed"
-        return close_to_close_vol(closes_1m, window=self.vol_window_minutes)
+        elif self.vol_mode == "blend":
+            sigma = blend_vol(closes_1m, horizon_seconds=horizon_seconds)
+        elif self.vol_mode == "ewma":
+            sigma = ewma_vol(
+                closes_1m, horizon_seconds=horizon_seconds,
+                half_life_min=self.ewma_half_life_min,
+            )
+        else:  # "fixed" — Phase 1 baseline
+            sigma = close_to_close_vol(closes_1m, window=self.vol_window_minutes)
+
+        # Long-window floor: never price below the trailing N-day realized vol
+        # (W1.4 — structural guard against calm-window mispricing). Disabled
+        # at vol_long_floor_days == 0 to preserve Phase 1 behavior by default.
+        if sigma is not None and self.vol_long_floor_days > 0:
+            floor_sigma = long_window_floor_vol(closes_1m, self.vol_long_floor_days)
+            if floor_sigma is not None and floor_sigma > sigma:
+                sigma = floor_sigma
+        return sigma
 
     def price(
         self,
