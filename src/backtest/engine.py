@@ -28,14 +28,17 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+import numpy as np
+
 from src.config import load_settings
 from src.execution.slippage import apply_slippage, fee_for
 from src.measurement.calibration import compute
+from src.pricing.pricer import CoinbasePricer
 from src.pricing.ticker import parse_ticker
 
 
@@ -101,6 +104,35 @@ def _settle_price(close_ms: int, cand_ts: list[int], cand_close: list[float]) ->
     return cand_close[best_idx]
 
 
+def _parse_iso_ms(s: str) -> int | None:
+    """Parse a stored ISO-8601 timestamp to unix-ms. SQLite stores either
+    'YYYY-MM-DDTHH:MM:SS.ffffff+00:00' (from .isoformat()) or '… ' with a
+    space separator. Returns None on parse failure."""
+    try:
+        dt = datetime.fromisoformat(s.replace(" ", "T"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
+def _build_pricer(settings, vol_mode_override: str | None = None) -> CoinbasePricer:
+    """Construct a CoinbasePricer from settings, optionally overriding vol_mode."""
+    return CoinbasePricer(
+        vol_window_minutes=settings.pricer.vol_window_minutes,
+        vol_floor=settings.pricer.vol_floor_annualized,
+        vol_ceiling=settings.pricer.vol_ceiling_annualized,
+        min_horizon_seconds=settings.pricer.min_horizon_seconds,
+        bracket_width_usd_default=settings.pricer.bracket_width_usd_default,
+        vol_mode=vol_mode_override or settings.pricer.vol_mode,
+        vol_window_floor_min=settings.pricer.vol_window_floor_min,
+        vol_window_cap_min=settings.pricer.vol_window_cap_min,
+        vol_long_floor_days=settings.pricer.vol_long_floor_days,
+        ewma_half_life_min=settings.pricer.ewma_half_life_min,
+    )
+
+
 def _outcome(terms, settle_price: float) -> int | None:
     if terms.direction == "above":
         if terms.strike_usd is None:
@@ -112,7 +144,32 @@ def _outcome(terms, settle_price: float) -> int | None:
     return 1 if (terms.bracket_low_usd <= settle_price < terms.bracket_high_usd) else 0
 
 
-def run_backtest(db_path: str, settings) -> dict:
+def run_backtest(
+    db_path: str,
+    settings,
+    *,
+    repricer_mode: str = "replay",
+    vol_mode: str | None = None,
+    execution_mode: str = "one-entry",
+) -> dict:
+    """Replay the strategy over historical estimates.
+
+    Parameters:
+      repricer_mode: "replay" uses stored probs (Phase-1 behavior); "reprice"
+        recomputes each prob from the candle history available at the
+        estimate's `computed_at`, using `vol_mode` (defaults to
+        settings.pricer.vol_mode). This is how we A/B the vol modes
+        introduced in B1/B2 against the same data.
+      execution_mode: "one-entry" caps to one trade per unique market (the
+        Phase-1 simplification); "faithful" honors the live rate-limit,
+        per-market position cap, and gross-exposure cap, so trade-level PnL
+        is comparable to a live run.
+    """
+    if repricer_mode not in ("replay", "reprice"):
+        raise ValueError(f"unknown repricer_mode={repricer_mode!r}")
+    if execution_mode not in ("one-entry", "faithful"):
+        raise ValueError(f"unknown execution_mode={execution_mode!r}")
+
     edge_threshold = settings.strategy.edge_threshold
     min_h = settings.strategy.min_horizon_seconds
     max_h = settings.strategy.max_horizon_seconds
@@ -124,6 +181,11 @@ def run_backtest(db_path: str, settings) -> dict:
     kelly_frac = settings.sizing.kelly_fraction
     max_ctr = settings.sizing.max_contracts_per_trade
 
+    # Faithful-execution caps (only consulted when execution_mode == "faithful").
+    rate_limit_ms = settings.execution.min_order_interval_ms
+    pos_cap = settings.risk.max_position_per_market
+    gross_cap = settings.risk.max_gross_exposure
+
     from src.strategy.kelly import kelly_contracts
 
     conn = sqlite3.connect(db_path)
@@ -133,9 +195,23 @@ def run_backtest(db_path: str, settings) -> dict:
     finally:
         conn.close()
 
+    # Pre-convert closes to a numpy array so re-price can take cheap views.
+    closes_arr = np.asarray(cand_close, dtype=float) if cand_close else np.empty(0)
+
+    # Re-price prerequisites
+    pricer = _build_pricer(settings, vol_mode) if repricer_mode == "reprice" else None
+    vol_window_floor = settings.pricer.vol_window_floor_min
+    n_reprice_skipped = 0  # estimates we couldn't re-price (insufficient history etc.)
+
     calib_pairs: list[tuple[float, int]] = []
     trades: list[Trade] = []
     traded_markets: set[str] = set()
+    # Faithful-execution state
+    positions_signed: dict[str, int] = defaultdict(int)
+    gross_abs: int = 0
+    last_order_ms: int = 0
+    n_rate_limited = 0
+    n_cap_blocked = 0
 
     n_total = len(estimates)
     n_unparsable = 0
@@ -156,7 +232,34 @@ def run_backtest(db_path: str, settings) -> dict:
             n_unsettleable += 1
             continue
 
-        prob = float(e["prob"])
+        # ── Re-price (B3 / T16): recompute prob with the candle history
+        # available at this estimate's computed_at, under the chosen vol_mode.
+        # Replay mode just uses the stored prob (Phase-1 behavior).
+        if repricer_mode == "reprice":
+            now_ms = _parse_iso_ms(e["computed_at"])
+            if now_ms is None:
+                n_reprice_skipped += 1
+                continue
+            # Closes strictly before computed_at (no peeking at future candles).
+            i = bisect_right(cand_ts, now_ms)
+            if i < vol_window_floor + 1:
+                n_reprice_skipped += 1
+                continue
+            closes_view = closes_arr[:i]
+            now_dt = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+            est_re = pricer.price(
+                market_id=e["market_id"],
+                spot_usd=float(e["spot_usd"]),
+                closes_1m=closes_view,
+                now=now_dt,
+                terms_override=terms,
+            )
+            if est_re is None:
+                n_reprice_skipped += 1
+                continue
+            prob = float(est_re.prob)
+        else:
+            prob = float(e["prob"])
         calib_pairs.append((prob, outcome))
 
         # ── Strategy decision (mirror EdgeStrategy, minus depth filter) ──
@@ -182,10 +285,6 @@ def run_backtest(db_path: str, settings) -> dict:
         else:
             continue
 
-        # One entry per contract (first signal), held to settlement.
-        if e["market_id"] in traded_markets:
-            continue
-
         kelly_prob = prob if side == "yes" else (1.0 - prob)
         qty = kelly_contracts(
             our_prob=kelly_prob,
@@ -197,7 +296,27 @@ def run_backtest(db_path: str, settings) -> dict:
         if qty <= 0:
             continue
 
-        traded_markets.add(e["market_id"])
+        if execution_mode == "one-entry":
+            # Phase-1 simplification: one trade per unique market, held to expiry.
+            if e["market_id"] in traded_markets:
+                continue
+            traded_markets.add(e["market_id"])
+        else:  # "faithful": honor rate-limit + per-market + gross caps
+            now_ms = _parse_iso_ms(e["computed_at"]) or 0
+            if now_ms - last_order_ms < rate_limit_ms:
+                n_rate_limited += 1
+                continue
+            cur = positions_signed[e["market_id"]]
+            signed_delta = qty if side == "yes" else -qty
+            new_pos = cur + signed_delta
+            new_gross = gross_abs - abs(cur) + abs(new_pos)
+            if abs(new_pos) > pos_cap or new_gross > gross_cap:
+                n_cap_blocked += 1
+                continue
+            positions_signed[e["market_id"]] = new_pos
+            gross_abs = new_gross
+            last_order_ms = now_ms
+
         fill_price = apply_slippage(intended, side, slip_bps)
         fee = fee_for(qty, fill_price, fee_bps)
 
@@ -225,6 +344,12 @@ def run_backtest(db_path: str, settings) -> dict:
         "n_settleable": len(calib_pairs),
         "calibration": report,
         "trades": trades,
+        "repricer_mode": repricer_mode,
+        "vol_mode": (vol_mode or settings.pricer.vol_mode) if repricer_mode == "reprice" else "replay",
+        "execution_mode": execution_mode,
+        "n_reprice_skipped": n_reprice_skipped,
+        "n_rate_limited": n_rate_limited,
+        "n_cap_blocked": n_cap_blocked,
     }
 
 
@@ -275,6 +400,11 @@ def print_report(res: dict) -> None:
 
     print("=" * 72)
     print("BACKTEST REPORT — Strategy 2 (BS-from-realized-vol vs Kalshi)")
+    print(
+        f"  mode: repricer={res.get('repricer_mode','replay')} "
+        f"vol_mode={res.get('vol_mode','replay')} "
+        f"execution={res.get('execution_mode','one-entry')}"
+    )
     print("=" * 72)
 
     print("\n── DATA COVERAGE ───────────────────────────────────────────────")
@@ -284,6 +414,12 @@ def print_report(res: dict) -> None:
           f"(no candle within ±2min of close)")
     print(f"  settleable           : {res['n_settleable']:,} "
           f"({100*res['n_settleable']/max(1,res['n_total_estimates']):.1f}%)")
+    if res.get("repricer_mode") == "reprice":
+        print(f"  reprice skipped      : {res.get('n_reprice_skipped',0):,} "
+              f"(insufficient candle history at estimate time)")
+    if res.get("execution_mode") == "faithful":
+        print(f"  rate-limited         : {res.get('n_rate_limited',0):,}")
+        print(f"  position/exposure cap blocks: {res.get('n_cap_blocked',0):,}")
 
     print("\n── PRICER CALIBRATION (all settleable estimates) ───────────────")
     if rep.n_samples == 0:
@@ -362,11 +498,31 @@ def print_report(res: dict) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Replay-backtest Strategy 2.")
     ap.add_argument("--db", default=None, help="SQLite DB path (default: from settings)")
+    ap.add_argument(
+        "--repricer-mode", choices=("replay", "reprice"), default="replay",
+        help="replay = use stored probs (Phase 1 default); "
+             "reprice = recompute prob from candles at each estimate's computed_at",
+    )
+    ap.add_argument(
+        "--vol-mode", default=None,
+        choices=("fixed", "horizon_scaled", "blend", "ewma"),
+        help="vol estimator for --repricer-mode=reprice (default: settings.pricer.vol_mode)",
+    )
+    ap.add_argument(
+        "--execution", choices=("one-entry", "faithful"), default="one-entry",
+        help="one-entry = one trade per unique market (Phase 1 default); "
+             "faithful = honor live rate-limit + per-market + gross-exposure caps",
+    )
     args = ap.parse_args()
 
     settings = load_settings()
     db_path = args.db or settings.storage.db_path
-    res = run_backtest(db_path, settings)
+    res = run_backtest(
+        db_path, settings,
+        repricer_mode=args.repricer_mode,
+        vol_mode=args.vol_mode,
+        execution_mode=args.execution,
+    )
     print_report(res)
 
 
