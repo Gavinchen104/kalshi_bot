@@ -176,6 +176,9 @@ async def run() -> None:
         vol_ceiling=settings.pricer.vol_ceiling_annualized,
         min_horizon_seconds=settings.pricer.min_horizon_seconds,
         bracket_width_usd_default=settings.pricer.bracket_width_usd_default,
+        vol_mode=settings.pricer.vol_mode,
+        vol_window_floor_min=settings.pricer.vol_window_floor_min,
+        vol_window_cap_min=settings.pricer.vol_window_cap_min,
     )
     strategy = EdgeStrategy(settings.strategy)
     kill = KillSwitch()

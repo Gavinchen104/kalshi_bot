@@ -50,6 +50,14 @@ class PricerConfig(BaseModel):
     # widths (e.g. $500 instead of $250) should be inferred in Phase 2 from
     # observed adjacent strikes in the same series.
     bracket_width_usd_default: float = 250.0
+    # Vol estimator selection. Default "fixed" preserves Phase 1 behavior
+    # (uses vol_window_minutes). Other modes ("horizon_scaled", "blend",
+    # "ewma") are introduced through Phase 2 Commit B; "fixed" remains the
+    # default so each mode change is A/B-comparable on the same data.
+    vol_mode: str = "fixed"
+    # Horizon-scaled mode clamps the lookback window to [floor, cap] minutes.
+    vol_window_floor_min: int = 60
+    vol_window_cap_min: int = 1440
 
 
 class StrategyConfig(BaseModel):

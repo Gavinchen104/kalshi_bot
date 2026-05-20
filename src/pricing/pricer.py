@@ -21,8 +21,18 @@ from datetime import datetime, timezone
 from scipy.stats import norm
 
 from src.pricing.ticker import parse_ticker
-from src.pricing.volatility import MINUTES_PER_YEAR, clamp_vol, close_to_close_vol
+from src.pricing.volatility import (
+    MINUTES_PER_YEAR,
+    clamp_vol,
+    close_to_close_vol,
+    horizon_matched_vol,
+)
 from src.types import ContractTerms, ProbEstimate
+
+
+# Vol-mode dispatch table; B2 adds "blend" and "ewma". "fixed" is the Phase 1
+# baseline and remains the default so each mode change is A/B-comparable.
+SUPPORTED_VOL_MODES = ("fixed", "horizon_scaled")
 
 
 def _d2(spot_usd: float, strike_usd: float, sigma_annualized: float, T_years: float) -> float:
@@ -74,12 +84,34 @@ class CoinbasePricer:
         vol_ceiling: float = 3.00,
         min_horizon_seconds: int = 5,
         bracket_width_usd_default: float = 250.0,
+        vol_mode: str = "fixed",
+        vol_window_floor_min: int = 60,
+        vol_window_cap_min: int = 1440,
     ) -> None:
+        if vol_mode not in SUPPORTED_VOL_MODES:
+            raise ValueError(
+                f"unknown vol_mode={vol_mode!r}; supported: {SUPPORTED_VOL_MODES}"
+            )
         self.vol_window_minutes = vol_window_minutes
         self.vol_floor = vol_floor
         self.vol_ceiling = vol_ceiling
         self.min_horizon_seconds = min_horizon_seconds
         self.bracket_width_usd_default = bracket_width_usd_default
+        self.vol_mode = vol_mode
+        self.vol_window_floor_min = vol_window_floor_min
+        self.vol_window_cap_min = vol_window_cap_min
+
+    def _estimate_vol(self, closes_1m, horizon_seconds: float) -> float | None:
+        """Dispatch to the selected vol estimator. 'fixed' is bit-identical to
+        the Phase 1 path (close_to_close_vol over self.vol_window_minutes)."""
+        if self.vol_mode == "horizon_scaled":
+            return horizon_matched_vol(
+                closes_1m, horizon_seconds=horizon_seconds,
+                floor_min=self.vol_window_floor_min,
+                cap_min=self.vol_window_cap_min,
+            )
+        # default / "fixed"
+        return close_to_close_vol(closes_1m, window=self.vol_window_minutes)
 
     def price(
         self,
@@ -102,7 +134,7 @@ class CoinbasePricer:
         if horizon < self.min_horizon_seconds:
             return None
 
-        sigma_raw = close_to_close_vol(closes_1m, window=self.vol_window_minutes)
+        sigma_raw = self._estimate_vol(closes_1m, horizon_seconds=horizon)
         sigma = clamp_vol(sigma_raw, self.vol_floor, self.vol_ceiling)
         if sigma is None:
             return None
