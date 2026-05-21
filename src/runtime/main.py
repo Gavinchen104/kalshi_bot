@@ -315,12 +315,14 @@ async def run() -> None:
                 order, status=result.get("status", "unknown"),
                 fill_price_cents=result.get("fill_price_cents"),
                 fee_cents=result.get("fee_cents"),
+                filled_quantity=result.get("filled_quantity"),
             )
-            if result.get("status") == "paper_filled":
+            if result.get("status") in {"paper_filled", "paper_partially_filled"}:
                 fill_price = int(result["fill_price_cents"])
                 fee = int(result.get("fee_cents") or 0)
-                pnl.on_fill(order.market_id, order.side, order.quantity, fill_price, fee)
-                signed = order.quantity if order.side == "yes" else -order.quantity
+                filled_qty = int(result.get("filled_quantity") or order.quantity)
+                pnl.on_fill(order.market_id, order.side, filled_qty, fill_price, fee)
+                signed = filled_qty if order.side == "yes" else -filled_qty
                 risk.apply_fill(order.market_id, signed, prob=signal.our_prob)
                 for pos in pnl.position_snapshot():
                     repo.save_position(

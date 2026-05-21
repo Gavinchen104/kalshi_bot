@@ -23,25 +23,35 @@ class PaperExecutor:
             return {"status": "skipped_rate_limited"}
         self._last_order_ts_ms = now_ms
 
-        # Fill if the resting book crosses our limit.
+        # Fill against visible top-of-book only; size beyond displayed depth is
+        # left unfilled so paper PnL is not optimistic about queue priority.
         if order.side == "yes":
             if state.ask_cents is None or state.ask_cents > order.price_cents:
                 return {"status": "paper_unfilled"}
             intended = state.ask_cents
+            visible_depth = state.ask_size
         else:
             if state.bid_cents is None or state.bid_cents < (100 - order.price_cents):
                 return {"status": "paper_unfilled"}
             intended = 100 - state.bid_cents
+            visible_depth = state.bid_size
+
+        usable_depth = int(visible_depth * self.config.top_book_fill_fraction)
+        filled_qty = min(order.quantity, max(0, usable_depth))
+        if filled_qty <= 0:
+            return {"status": "paper_unfilled"}
 
         fill_price = apply_slippage(intended, order.side, self.config.slippage_bps)
-        fee = fee_for(order.quantity, fill_price, self.config.fee_bps)
+        fee = fee_for(filled_qty, fill_price, self.config.fee_bps)
+        status = "paper_filled" if filled_qty == order.quantity else "paper_partially_filled"
         logger.info(
             "paper_fill",
             market_id=order.market_id, side=order.side,
-            qty=order.quantity, fill_price=fill_price, fee=fee,
+            qty=filled_qty, requested_qty=order.quantity, fill_price=fill_price, fee=fee,
         )
         return {
-            "status": "paper_filled",
+            "status": status,
             "fill_price_cents": fill_price,
             "fee_cents": fee,
+            "filled_quantity": filled_qty,
         }

@@ -17,9 +17,17 @@ class Repository:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as c:
             c.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+            self._migrate(c)
 
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        paper_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(paper_order)").fetchall()
+        }
+        if "filled_quantity" not in paper_cols:
+            conn.execute("ALTER TABLE paper_order ADD COLUMN filled_quantity INTEGER")
 
     # ── writes ────────────────────────────────────────────────────────────
     def save_market_state(self, state: MarketState) -> None:
@@ -79,16 +87,18 @@ class Repository:
         status: str,
         fill_price_cents: int | None = None,
         fee_cents: int | None = None,
+        filled_quantity: int | None = None,
     ) -> int:
         with self._conn() as c:
             cur = c.execute(
                 """
-                INSERT INTO paper_order(market_id, side, price_cents, quantity, status,
-                                       fill_price_cents, fee_cents)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO paper_order(market_id, side, price_cents, quantity,
+                                       filled_quantity, status, fill_price_cents,
+                                       fee_cents)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (order.market_id, order.side, order.price_cents, order.quantity,
-                 status, fill_price_cents, fee_cents),
+                 filled_quantity, status, fill_price_cents, fee_cents),
             )
             return cur.lastrowid
 
@@ -256,12 +266,12 @@ class Repository:
     def recent_paper_orders(self, limit: int = 200) -> list[dict]:
         with self._conn() as c:
             rows = c.execute(
-                "SELECT market_id, side, price_cents, quantity, status, fill_price_cents, "
+                "SELECT market_id, side, price_cents, quantity, filled_quantity, status, fill_price_cents, "
                 "fee_cents, created_at FROM paper_order ORDER BY id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
-        keys = ("market_id", "side", "price_cents", "quantity", "status", "fill_price_cents",
-                "fee_cents", "created_at")
+        keys = ("market_id", "side", "price_cents", "quantity", "filled_quantity", "status",
+                "fill_price_cents", "fee_cents", "created_at")
         return [dict(zip(keys, r)) for r in rows]
 
     def pnl_series(self, limit: int = 1000) -> list[dict]:

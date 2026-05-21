@@ -107,6 +107,7 @@ class ExecutionConfig(BaseModel):
     fee_bps: int = 50
     slippage_bps: int = 20
     min_order_interval_ms: int = 500
+    top_book_fill_fraction: float = 1.0
 
 
 class StorageConfig(BaseModel):

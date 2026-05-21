@@ -71,6 +71,7 @@ execution:
   fee_bps: 50
   slippage_bps: 20
   min_order_interval_ms: 500
+  top_book_fill_fraction: 1.0
 
 storage:
   db_path: data/bot.db

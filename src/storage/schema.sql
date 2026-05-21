@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS paper_order (
     side TEXT NOT NULL,
     price_cents INTEGER NOT NULL,
     quantity INTEGER NOT NULL,
+    filled_quantity INTEGER,
     status TEXT NOT NULL,
     fill_price_cents INTEGER,
     fee_cents INTEGER,
