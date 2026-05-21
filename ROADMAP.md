@@ -18,7 +18,7 @@ live trading before Phase 3 GATE C.
 |---|---|---|---|---|
 | **1 — Build & Discover** | Build Strategy 2 (BS pricer vs Kalshi) end-to-end + dashboard + backtest; find out if it works | Post-mortem: is there *any* signal? | ✅ Complete (negative result) | [PHASE1_PLAN.md](PHASE1_PLAN.md) |
 | **2 — Remediate & Validate** | Fix the bugs Phase 1 exposed; horizon-matched vol; prove or disprove the pricer can be calibrated | **GATE A** — pricer calibration on backtest | ✅ Complete (GATE A FAIL, 2026-05-20) | [PHASE2_PLAN.md](PHASE2_PLAN.md) |
-| **3 — Live or Pivot** | If GATE A passes: validate forward → tiny-size live. If it fails: escalating pivots, then hard stop | **GATE B/C** (live) or **mini-gates** (pivot) | 🔄 Track B (pivot) active | [PHASE3_PLAN.md](PHASE3_PLAN.md) |
+| **3 — Live or Pivot** | If GATE A passes: validate forward → tiny-size live. If it fails: escalating pivots, then hard stop | **GATE B/C** (live) or **mini-gates** (pivot) | 🔄 GATE B forward paper pending | [PHASE3_PLAN.md](PHASE3_PLAN.md) |
 | **4 — Operate & Scale** | Run as a production system; scale capital responsibly; detect alpha decay | **GATE D** (each scale step) | ⏸ Gated on GATE C | [PHASE4_PLAN.md](PHASE4_PLAN.md) |
 
 ---
@@ -32,17 +32,18 @@ threshold, tail-bin empirical 0.096 vs the 0.02 threshold. Full per-mode
 breakdown in [PHASE2_PLAN.md §2.1](PHASE2_PLAN.md). Realized-vol-only Black–
 Scholes does not pass calibration for these contracts.
 
-**Active work: Phase 3 Track B (pivot).** **B1 — empirical calibration
+**Active work: Phase 3 Track B rejoined Track A validation.** **B1 — empirical calibration
 layer**: mini-gate PASS (2026-05-20). Isotonic regression on raw BS-probs
 drops OOS log loss from 1.69 → 0.27 and tail-bin emp from 0.124 → 0.019
 (80/20 time-series split, no look-ahead). Multi-fold CV shows the tail
 criterion is brittle (2/4 folds pass) — log loss criterion is solid — so
 B1 is a *tentative* pass; the binding test is GATE B forward validation.
 
-**Next:** rejoin Track A at **A1 (resolution-source basis study)**, ship a
-calibrator artifact into the live strategy, then advance through GATE B
-(forward paper, ≥5 days continuous) and GATE C (tiny-size live with human
-sign-off).
+**Built since B1:** A1 near-strike guard, live calibrator artifact wiring, A2
+top-book-aware paper fills, A4 risk hardening, X1 alerting, and X2 runbook.
+
+**Next:** run **GATE B** (forward paper, ≥5 days continuous). GATE C remains
+blocked until GATE B passes and a human signs the tiny-live checklist.
 
 ---
 

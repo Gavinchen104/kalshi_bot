@@ -73,6 +73,19 @@ GATE C may be considered only after GATE B passes.
 - If approved, run tiny live only. Two consecutive green realized-PnL weeks are
   required before Phase 4 can be discussed.
 
+## A6 Scaling Ladder Definition
+
+This ladder is defined now but must not be executed until GATE C has held.
+
+- Step 0: paper only, current Phase 3 default.
+- Step 1: tiny live, `max_contracts_per_trade: 1`, only after GATE C sign-off.
+- Step 2: `max_contracts_per_trade: 3`, only after two green tiny-live weeks and
+  no calibration-drift or risk kill-switch alerts.
+- Step 3: `max_contracts_per_trade: 10`, only after another sustained-green
+  window at Step 2.
+- Roll back one step immediately on drawdown breach, calibration drift, or any
+  unresolved data-quality alert.
+
 ## Backup And Restore
 
 The local SQLite DB is `data/bot.db`.

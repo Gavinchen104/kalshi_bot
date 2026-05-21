@@ -1,6 +1,6 @@
 # Phase 3 Plan — Post-GATE-A: Path to Live, or Pivot
 
-_Status: 🔄 Track B active (Phase 2 GATE A FAIL) · B1 mini-gate PASS (2026-05-20, brittle on tail) · Next: A1 basis study_
+_Status: 🔄 Track B rejoined Track A validation · B1 mini-gate PASS (2026-05-20, brittle on tail) · A1/A2/A4/X1/X2 code shipped · Next: GATE B forward paper window_
 
 ---
 
@@ -72,9 +72,11 @@ days) is the binding test that resolves the multi-fold concern. The B1
 mapping is genuinely informative (log loss dropped from 1.69 → 0.27 OOS) but
 the tail criterion needs forward confirmation, not backward overfit.
 
-**Next:** rejoin Track A at **A1 (resolution-source basis study)**. Implementation
-will produce + persist the calibrator artifact and wire it into the live
-strategy so GATE B exercises the same calibrated path.
+**Next:** run the **GATE B forward paper window** under the supervisor for at
+least five continuous trading days. The B1 artifact is produced by
+`python -m src.backtest.engine --mini-gate-b1` at
+`data/models/b1_isotonic.json` and `EdgeStrategy` consumes that artifact when
+present, so GATE B exercises the calibrated live path.
 
 ### A1 — Resolution-source basis study · _2026-05-20_
 
@@ -254,7 +256,7 @@ No `BOT_ALLOW_LIVE_TRADING=true` before GATE C, ever.
 
 ## 9. Task Checklist
 
-- [ ] Confirm Phase 2 GATE A result is recorded in `PHASE2_PLAN.md`; select Track A or B
-- **Track A:** [ ] A1 basis study · [ ] A2 fill calibration · [ ] **GATE B** · [ ] A4 risk hardening · [ ] **GATE C** (sign-off) · [ ] A6 scaling ladder
-- **Track B:** [ ] B1 calibration layer + mini-gate · [ ] B2 Deribit IV + mini-gate · [ ] B3 reframe/abandon decision (documented)
-- **Cross-cutting:** [ ] X1 alerting · [ ] X2 runbook · [ ] X3 settlement-source fidelity
+- [x] Confirm Phase 2 GATE A result is recorded in `PHASE2_PLAN.md`; select Track A or B
+- **Track A:** [x] A1 basis study · [x] A2 fill calibration · [ ] **GATE B** · [x] A4 risk hardening · [ ] **GATE C** (sign-off) · [x] A6 scaling ladder definition
+- **Track B:** [x] B1 calibration layer + mini-gate · [ ] B2 Deribit IV + mini-gate (not needed while B1 path remains alive) · [ ] B3 reframe/abandon decision (only if B1/B2 path fails)
+- **Cross-cutting:** [x] X1 alerting · [x] X2 runbook · [ ] X3 settlement-source fidelity (blocked unless/ until actual Kalshi settlement source is available)
