@@ -32,6 +32,7 @@ from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 
@@ -810,6 +811,11 @@ def main() -> None:
 
     settings = load_settings()
     db_path = args.db or settings.storage.db_path
+    if not Path(db_path).exists():
+        print(f"Missing SQLite DB: {db_path}")
+        print("Run the bot long enough to collect data, or pass --db /path/to/bot.db.")
+        import sys as _sys
+        _sys.exit(1)
 
     if args.gate_a:
         import sys as _sys
