@@ -129,14 +129,18 @@ def compute_basis_report(db_path: str, settings) -> BasisReport:
     prox_pct = _percentiles(proximity, [0.10, 0.25, 0.50, 0.75, 0.90])
     jit_pct = _percentiles(jitter, [0.50, 0.90, 0.95, 0.99])
 
-    # Conservative band: max(jitter p95, 2× proximity p10). The first floors at
-    # measurable intra-feed noise; the second protects the tightest-settlement
-    # contracts where a small basis would actually flip the outcome.
+    # Band = jitter_p95 * safety_multiple, capped at proximity_p50.
+    #
+    # The basis magnitude we're guarding against is approximated by intra-feed
+    # jitter (~tens of USD); proximity measures *exposure* (how rarely contracts
+    # are near-the-money), NOT basis size, so it acts only as a cap — never set
+    # the band so wide it would suppress more than ~half of contracts.
+    SAFETY_MULTIPLE = 2.0
     band = 0.0
     if jit_pct["p95"] is not None:
-        band = max(band, jit_pct["p95"])
-    if prox_pct["p10"] is not None:
-        band = max(band, 2.0 * prox_pct["p10"])
+        band = jit_pct["p95"] * SAFETY_MULTIPLE
+    if prox_pct["p50"] is not None:
+        band = min(band, prox_pct["p50"])  # cap: don't suppress > half of contracts
     return BasisReport(
         n_settled=len(prox), proximity_usd=proximity, jitter_std_usd=jitter,
         proximity_pct=prox_pct, jitter_pct=jit_pct,
@@ -172,7 +176,7 @@ def print_basis_report(r: BasisReport) -> None:
     print(f"    p50 {j50}   p90 {j90}   p95 {j95}   p99 {j99}")
 
     print("\n── RECOMMENDED NEAR-STRIKE GUARD BAND ──────────────────────────")
-    print(f"  band = max(jitter p95, 2× proximity p10)")
+    print(f"  band = jitter_p95 × 2, capped at proximity_p50")
     print(f"       = ${r.recommended_guard_usd:.2f}")
     print(f"\n  Wire this into settings.yaml as:")
     print(f"     strategy:")

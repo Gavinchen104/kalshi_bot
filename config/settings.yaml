@@ -40,9 +40,10 @@ strategy:
   max_horizon_seconds: 86400
   max_spread_cents: 10
   min_top_book_depth: 5
-  # Phase 3 / A1: near-strike guard band (USD). Set from
-  # `python -m src.measurement.basis`. 0 disables the guard.
-  near_strike_guard_usd: 0.0
+  # Phase 3 / A1: near-strike guard band (USD). Measured 2026-05-20 from
+  # `python -m src.measurement.basis` = jitter_p95 ($52.87) × 2. Suppresses
+  # signals where |spot − strike| is within this band (cross-feed basis risk).
+  near_strike_guard_usd: 105.75
 
 sizing:
   bankroll_cents: 50000

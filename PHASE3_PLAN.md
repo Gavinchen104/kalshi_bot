@@ -76,6 +76,42 @@ the tail criterion needs forward confirmation, not backward overfit.
 will produce + persist the calibrator artifact and wire it into the live
 strategy so GATE B exercises the same calibrated path.
 
+### A1 — Resolution-source basis study · _2026-05-20_
+
+`python -m src.measurement.basis` over 752 settled contracts. We cannot
+measure true Kalshi-vs-Coinbase basis (no ground-truth Kalshi settlement
+prints), so two proxies bound the risk:
+
+| Measure | p10 | p50 | p90 | p95 |
+|---|---:|---:|---:|---:|
+| Settlement proximity \|settle − strike\| (USD) | 948 | 4,700 | 8,838 | — |
+| Intra-Coinbase close jitter ±5min std (USD) | — | 38.5 | — | **52.9** |
+
+- **Proximity is large** — contracts almost never settle near their strike
+  (BTC daily strikes span a wide ladder around ~$80k spot). So basis risk is
+  rarely *binding*; only a thin slice of contracts sit near the money at close.
+- **Jitter ≈ $53 (p95)** is the defensible basis-magnitude proxy: even within
+  Coinbase, the close wobbles this much in an 11-min window, so true cross-feed
+  basis is at least this large.
+
+**Formula correction (made during A1):** the initial auto-recommendation used
+`max(jitter_p95, 2×proximity_p10)` = **$1,896**, which is wrong — `2×proximity_p10`
+treats "how rarely contracts settle near strike" as a basis magnitude (unrelated
+quantities). Fixed to `jitter_p95 × 2`, capped at `proximity_p50` (proximity is
+an *exposure cap*, not a basis floor).
+
+**Result: near-strike guard band = $105.75** (= $52.87 × 2, far under the
+$4,700 proximity_p50 cap). Wired into `config/settings.yaml`
+(`strategy.near_strike_guard_usd: 105.75`). `EdgeStrategy` now suppresses
+signals where `|spot − strike|` (or `|spot − bracket-midpoint|`) is within the
+band. Given the proximity distribution this suppresses only a small fraction of
+contracts — the few genuinely at the moneyness boundary — preserving signal
+volume while removing the trades most corruptible by feed mismatch.
+
+**Caveat:** $53 jitter is a *floor*, not the true basis. If forward GATE B
+shows near-strike trades still misbehave, raise the safety multiple or pursue
+X3 (settle calibration against the actual Kalshi source).
+
 ---
 
 ## 3. TRACK A — Validation to Live _(only if GATE A passed)_
