@@ -81,3 +81,18 @@ def test_predict_before_fit_errors():
     import pytest
     with pytest.raises(RuntimeError):
         IsotonicCalibrator().predict(np.array([0.5]))
+
+
+def test_calibrator_round_trips_json_artifact(tmp_path):
+    cal = IsotonicCalibrator().fit(
+        np.array([0.1, 0.2, 0.8, 0.9]),
+        np.array([0.0, 0.0, 1.0, 1.0]),
+    )
+    path = tmp_path / "b1_isotonic.json"
+
+    cal.save(path, metadata={"phase": "3", "workstream": "B1"})
+    loaded = IsotonicCalibrator.load(path)
+
+    grid = np.array([0.05, 0.15, 0.85, 0.95])
+    assert np.allclose(loaded.predict(grid), cal.predict(grid))
+    assert loaded.predict_one(0.85) == cal.predict_one(0.85)

@@ -18,6 +18,9 @@ data it was fit on.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -85,6 +88,40 @@ class IsotonicCalibrator:
         idx = np.searchsorted(self._block_x, q, side="left")
         idx = np.clip(idx, 0, self._block_x.size - 1)
         return self._block_y[idx]
+
+    def predict_one(self, raw_prob: float) -> float:
+        """Map one raw probability through the fitted curve."""
+        return float(self.predict(np.asarray([raw_prob], dtype=float))[0])
+
+    def to_dict(self, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self._block_x is None or self._block_y is None or self._block_x.size == 0:
+            raise RuntimeError("IsotonicCalibrator.fit() has not been called")
+        return {
+            "model_type": "isotonic_pav",
+            "block_x": self._block_x.tolist(),
+            "block_y": self._block_y.tolist(),
+            "metadata": metadata or {},
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "IsotonicCalibrator":
+        if payload.get("model_type") != "isotonic_pav":
+            raise ValueError(f"unsupported calibrator model_type={payload.get('model_type')!r}")
+        block_x = np.asarray(payload.get("block_x", []), dtype=float)
+        block_y = np.asarray(payload.get("block_y", []), dtype=float)
+        if block_x.size == 0 or block_x.size != block_y.size:
+            raise ValueError("invalid isotonic calibrator payload")
+        return cls(_block_x=block_x, _block_y=block_y)
+
+    def save(self, path: str | Path, metadata: dict[str, Any] | None = None) -> None:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(self.to_dict(metadata), indent=2, sort_keys=True), encoding="utf-8")
+
+    @classmethod
+    def load(cls, path: str | Path) -> "IsotonicCalibrator":
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        return cls.from_dict(payload)
 
 
 def time_series_split(n: int, train_frac: float = 0.8) -> tuple[slice, slice]:

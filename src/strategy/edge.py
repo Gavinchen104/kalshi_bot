@@ -5,15 +5,26 @@ Signal only when the disagreement is large enough to overcome fees+slippage+safe
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 from src.config import StrategyConfig
 from src.pricing.ticker import parse_ticker
+from src.strategy.calibrator import IsotonicCalibrator
 from src.types import MarketState, ProbEstimate, Signal
 
 
 class EdgeStrategy:
     def __init__(self, config: StrategyConfig) -> None:
         self.config = config
+        self.calibrator = self._load_calibrator(config.calibration_model_path)
+
+    def _load_calibrator(self, path: str | None) -> IsotonicCalibrator | None:
+        if not path:
+            return None
+        model_path = Path(path)
+        if not model_path.exists():
+            return None
+        return IsotonicCalibrator.load(model_path)
 
     def _near_strike(self, market_id: str, spot_usd: float) -> bool:
         """A1 guard: True when |spot − strike| (or |spot − bracket mid|)
@@ -50,7 +61,7 @@ class EdgeStrategy:
         if self._near_strike(est.market_id, est.spot_usd):
             return None
 
-        our_prob = est.prob
+        our_prob = self.calibrator.predict_one(est.prob) if self.calibrator is not None else est.prob
         market_mid_prob = (state.bid_cents + state.ask_cents) / 200.0  # midpoint as Kalshi's prob
 
         # Buy YES when our_prob >> ask/100 (Kalshi is selling too cheaply)

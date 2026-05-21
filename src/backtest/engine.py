@@ -753,6 +753,22 @@ def run_mini_gate_b1(db_path: str, settings) -> int:
     if passes:
         print(f"\n  MINI-GATE B1: ✅ PASS  → calibration layer is viable")
         print(f"  → Rejoin Phase 3 Track A at A1 (basis study) with calibrated probs")
+        artifact_path = settings.strategy.calibration_model_path
+        if artifact_path:
+            final_cal = IsotonicCalibrator().fit(raw, y)
+            final_cal.save(
+                artifact_path,
+                metadata={
+                    "phase": "3",
+                    "workstream": "B1",
+                    "fit_samples": int(n),
+                    "mini_gate_train_samples": int(tr.stop - tr.start),
+                    "mini_gate_test_samples": int(te.stop - te.start),
+                    "oos_log_loss": cal_ll,
+                    "oos_tail_emp_0_0p1": cal_tail,
+                },
+            )
+            print(f"  wrote live calibrator artifact: {artifact_path}")
         rc = 0
     else:
         print(f"\n  MINI-GATE B1: ❌ FAIL  → escalate to B2 (Deribit IV)")

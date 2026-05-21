@@ -72,6 +72,9 @@ class StrategyConfig(BaseModel):
     max_horizon_seconds: int = 900
     max_spread_cents: int = 10
     min_top_book_depth: int = 5
+    # Phase 3 / B1: persisted isotonic calibration artifact. When present, the
+    # live strategy maps raw BS probabilities through it before edge decisions.
+    calibration_model_path: str | None = None
     # Phase 3 / A1: suppress signals when |spot − strike| (or |spot − bracket
     # midpoint|) is below this band. Bounds Kalshi-vs-Coinbase resolution-
     # source basis risk at the moneyness boundary. 0 = guard disabled (default

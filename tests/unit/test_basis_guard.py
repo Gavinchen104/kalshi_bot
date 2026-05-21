@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from src.config import StrategyConfig
+from src.strategy.calibrator import IsotonicCalibrator
 from src.strategy.edge import EdgeStrategy
 from src.types import MarketState, ProbEstimate
 
@@ -74,3 +75,20 @@ def test_unparsable_ticker_does_not_block():
     sig = s.evaluate(_est(market_id="garbage-id", spot=80_005.0), _state())
     # Guard returns False for unparsable tickers → edge filter still applies normally.
     assert sig is not None
+
+
+def test_strategy_uses_configured_calibration_model(tmp_path):
+    cal = IsotonicCalibrator().fit(
+        raw_probs=[0.20, 0.90],
+        outcomes=[0.80, 0.95],
+    )
+    path = tmp_path / "b1_isotonic.json"
+    cal.save(path)
+
+    cfg = _cfg(guard_usd=0.0).model_copy(update={"calibration_model_path": str(path)})
+    strategy = EdgeStrategy(cfg)
+    sig = strategy.evaluate(_est(prob=0.20), _state(bid=60, ask=62))
+
+    assert sig is not None
+    assert sig.side == "yes"
+    assert sig.our_prob == 0.8
