@@ -57,6 +57,11 @@ sizing:
 risk:
   max_position_per_market: 25
   max_gross_exposure: 50
+  max_tail_short_exposure: 10
+  tail_low_prob: 0.10
+  tail_high_prob: 0.90
+  vol_regime_zscore: 3.0
+  vol_regime_min_samples: 30
   max_daily_loss_cents: 5000
   max_drawdown_cents: 3000
   max_data_age_seconds: 10

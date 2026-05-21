@@ -91,6 +91,11 @@ class SizingConfig(BaseModel):
 class RiskConfig(BaseModel):
     max_position_per_market: int = 25
     max_gross_exposure: int = 50
+    max_tail_short_exposure: int = 10
+    tail_low_prob: float = 0.10
+    tail_high_prob: float = 0.90
+    vol_regime_zscore: float = 3.0
+    vol_regime_min_samples: int = 30
     max_daily_loss_cents: int = 5_000
     max_drawdown_cents: int = 3_000
     max_data_age_seconds: int = 10

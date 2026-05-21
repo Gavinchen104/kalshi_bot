@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from statistics import mean, pstdev
 
 from src.config import RiskConfig
 from src.risk.kill_switch import KillSwitch
@@ -23,15 +24,41 @@ class RiskEngine:
         self._order_times: list[datetime] = []
         self._positions: dict[str, int] = {}
         self._gross: int = 0
+        self._market_probs: dict[str, float] = {}
+        self._tail_short_by_market: dict[str, int] = {}
+        self._vol_history: list[float] = []
 
     def update_session_pnl(self, pnl_cents: int) -> None:
         self.session_pnl_cents = pnl_cents
         if pnl_cents > self.peak_pnl_cents:
             self.peak_pnl_cents = pnl_cents
 
-    def apply_fill(self, market_id: str, signed_qty: int) -> None:
+    def update_market_probability(self, market_id: str, prob: float) -> None:
+        self._market_probs[market_id] = min(1.0, max(0.0, float(prob)))
+
+    def update_realized_vol(self, vol_annualized: float) -> None:
+        """Engage the kill switch when live vol jumps far above recent regime."""
+        vol = float(vol_annualized)
+        if vol <= 0:
+            return
+        min_n = self.config.vol_regime_min_samples
+        if len(self._vol_history) >= min_n and self.config.vol_regime_zscore > 0:
+            avg = mean(self._vol_history)
+            sigma = pstdev(self._vol_history)
+            if sigma > 0 and vol > avg + self.config.vol_regime_zscore * sigma:
+                self.kill_switch.engage("vol_regime_jump")
+        self._vol_history.append(vol)
+        keep = max(min_n * 4, min_n, 1)
+        self._vol_history = self._vol_history[-keep:]
+
+    def apply_fill(self, market_id: str, signed_qty: int, prob: float | None = None) -> None:
         self._positions[market_id] = self._positions.get(market_id, 0) + signed_qty
         self._gross = sum(abs(q) for q in self._positions.values())
+        p = self._market_probs.get(market_id) if prob is None else min(1.0, max(0.0, float(prob)))
+        if p is not None and self._is_tail_short(signed_qty, p):
+            self._tail_short_by_market[market_id] = (
+                self._tail_short_by_market.get(market_id, 0) + abs(signed_qty)
+            )
 
     def validate(self, order: ProposedOrder, state: MarketState) -> RiskResult:
         if self.kill_switch.engaged:
@@ -48,6 +75,8 @@ class RiskEngine:
             return RiskResult(False, "max_position_per_market")
         if self._breach_gross(order):
             return RiskResult(False, "max_gross_exposure")
+        if self._breach_tail_short(order):
+            return RiskResult(False, "max_tail_short_exposure")
         if self.session_pnl_cents <= -self.config.max_daily_loss_cents:
             self.kill_switch.engage("daily_loss_limit")
             return RiskResult(False, "daily_loss_limit")
@@ -64,6 +93,25 @@ class RiskEngine:
 
     def _breach_gross(self, order: ProposedOrder) -> bool:
         return (self._gross + order.quantity) > self.config.max_gross_exposure
+
+    def _breach_tail_short(self, order: ProposedOrder) -> bool:
+        cap = self.config.max_tail_short_exposure
+        if cap <= 0:
+            return False
+        prob = self._market_probs.get(order.market_id)
+        if prob is None:
+            return False
+        signed = order.quantity if order.side == "yes" else -order.quantity
+        if not self._is_tail_short(signed, prob):
+            return False
+        return (sum(self._tail_short_by_market.values()) + order.quantity) > cap
+
+    def _is_tail_short(self, signed_qty: int, prob: float) -> bool:
+        if signed_qty < 0 and prob <= self.config.tail_low_prob:
+            return True
+        if signed_qty > 0 and prob >= self.config.tail_high_prob:
+            return True
+        return False
 
     def _stale(self, state: MarketState) -> bool:
         age = datetime.now(tz=timezone.utc) - state.updated_at

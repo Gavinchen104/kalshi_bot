@@ -240,12 +240,14 @@ async def run() -> None:
             est = pricer.price(state.market_id, spot, closes)
             if est is None:
                 continue
+            risk.update_realized_vol(est.vol_annualized)
             repo.save_prob_estimate(est, state)
 
             signal = strategy.evaluate(est, state)
             if signal is None:
                 continue
             repo.save_signal(signal)
+            risk.update_market_probability(signal.market_id, signal.our_prob)
 
             price = state.ask_cents if signal.side == "yes" else (100 - (state.bid_cents or 0))
             qty = kelly_contracts(
@@ -278,7 +280,7 @@ async def run() -> None:
                 fee = int(result.get("fee_cents") or 0)
                 pnl.on_fill(order.market_id, order.side, order.quantity, fill_price, fee)
                 signed = order.quantity if order.side == "yes" else -order.quantity
-                risk.apply_fill(order.market_id, signed)
+                risk.apply_fill(order.market_id, signed, prob=signal.our_prob)
                 for pos in pnl.position_snapshot():
                     repo.save_position(
                         pos["market_id"], pos["net_quantity"],
