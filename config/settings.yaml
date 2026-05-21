@@ -40,6 +40,9 @@ strategy:
   max_horizon_seconds: 86400
   max_spread_cents: 10
   min_top_book_depth: 5
+  # Phase 3 / A1: near-strike guard band (USD). Set from
+  # `python -m src.measurement.basis`. 0 disables the guard.
+  near_strike_guard_usd: 0.0
 
 sizing:
   bankroll_cents: 50000

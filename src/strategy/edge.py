@@ -7,12 +7,32 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from src.config import StrategyConfig
+from src.pricing.ticker import parse_ticker
 from src.types import MarketState, ProbEstimate, Signal
 
 
 class EdgeStrategy:
     def __init__(self, config: StrategyConfig) -> None:
         self.config = config
+
+    def _near_strike(self, market_id: str, spot_usd: float) -> bool:
+        """A1 guard: True when |spot − strike| (or |spot − bracket mid|)
+        is within ``near_strike_guard_usd``. 0 disables the guard."""
+        band = self.config.near_strike_guard_usd
+        if band <= 0:
+            return False
+        terms = parse_ticker(market_id, settlement_mode=True)
+        if terms is None:
+            return False  # unparsable ticker → don't block trading
+        if terms.direction == "above":
+            ref = terms.strike_usd
+        else:
+            if terms.bracket_low_usd is None or terms.bracket_high_usd is None:
+                return False
+            ref = (terms.bracket_low_usd + terms.bracket_high_usd) / 2.0
+        if ref is None:
+            return False
+        return abs(spot_usd - ref) < band
 
     def evaluate(self, est: ProbEstimate, state: MarketState) -> Signal | None:
         if state.bid_cents is None or state.ask_cents is None:
@@ -24,6 +44,10 @@ class EdgeStrategy:
         if est.horizon_seconds < self.config.min_horizon_seconds:
             return None
         if est.horizon_seconds > self.config.max_horizon_seconds:
+            return None
+        # A1 near-strike guard: drop signals where |spot − strike| is within
+        # the measured Coinbase-vs-Kalshi-source risk band.
+        if self._near_strike(est.market_id, est.spot_usd):
             return None
 
         our_prob = est.prob
