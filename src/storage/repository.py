@@ -209,6 +209,12 @@ class Repository:
             ).fetchall()
         return [int(r[0]) for r in rows]
 
+    def candle_coverage(self, start_ms: int, end_ms: int) -> dict:
+        timestamps = self.candle_timestamps(start_ms, end_ms)
+        expected = max(0, (end_ms - start_ms) // 60_000)
+        coverage = (len(timestamps) / expected) if expected else 1.0
+        return {"expected": expected, "actual": len(timestamps), "coverage": coverage}
+
     def recent_prob_estimates(self, limit: int = 500) -> list[dict]:
         with self._conn() as c:
             rows = c.execute(

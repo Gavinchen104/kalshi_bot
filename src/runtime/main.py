@@ -15,6 +15,7 @@ from src.data.kalshi_rest import KalshiClient
 from src.data.kalshi_ws import KalshiWSClient
 from src.execution.paper_executor import PaperExecutor
 from src.measurement.reporter import settle_and_snapshot
+from src.monitoring.alerts import AlertManager
 from src.monitoring.logging import configure_logging, get_logger
 from src.portfolio.pnl import PnLTracker
 from src.pricing.pricer import CoinbasePricer
@@ -47,6 +48,7 @@ async def _periodic_housekeeping(
     coinbase_store,
     settings,
     state_marker: dict,
+    alerts: AlertManager,
 ) -> None:
     """Persist Coinbase candles + run calibration on a fixed cadence,
     independent of whether Kalshi WS is producing market state updates.
@@ -71,16 +73,43 @@ async def _periodic_housekeeping(
             coinbase_candles=coinbase_store.candle_count,
             spot=coinbase_store.latest_price,
         )
+        if secs_since_kalshi > settings.monitoring.stalled_feed_seconds:
+            await alerts.emit(
+                "stalled_kalshi_feed",
+                "Kalshi market-state feed has stalled",
+                {"seconds_since_kalshi_state": int(secs_since_kalshi)},
+            )
+
+        window_ms = settings.monitoring.data_quality_window_hours * 3600 * 1000
+        end_ms = int(time.time() * 1000)
+        coverage = repo.candle_coverage(end_ms - window_ms, end_ms)
+        if coverage["coverage"] < settings.monitoring.data_quality_min_coverage:
+            await alerts.emit(
+                "coinbase_data_quality",
+                "Coinbase candle coverage is below the Phase 3 X1 bar",
+                coverage,
+            )
 
         # Calibration runs every ~2 minutes.
         if (now - state_marker.get("last_calibration_ts", 0)) > 120.0:
             try:
-                settle_and_snapshot(
+                report = settle_and_snapshot(
                     repo,
                     window=settings.measurement.calibration_window,
                     n_bins=settings.measurement.calibration_bins,
                 )
                 state_marker["last_calibration_ts"] = now
+                if (
+                    report is not None
+                    and report["n_samples"] >= settings.monitoring.calibration_drift_min_samples
+                    and report["brier"] is not None
+                    and report["brier"] > settings.monitoring.calibration_drift_brier_threshold
+                ):
+                    await alerts.emit(
+                        "calibration_drift",
+                        "Rolling calibration Brier exceeded the Phase 3 X1 threshold",
+                        {"brier": report["brier"], "n_samples": report["n_samples"]},
+                    )
             except Exception as exc:
                 logger.warning("calibration_failed", error=str(exc))
 
@@ -187,6 +216,7 @@ async def run() -> None:
     risk = RiskEngine(settings.risk, kill_switch=kill)
     executor = PaperExecutor(settings.execution)
     pnl = PnLTracker()
+    alerts = AlertManager(settings.monitoring, webhook_url=settings.env.bot_alert_webhook_url)
 
     # Fetch the currently-open BTC market tickers so we can explicitly subscribe.
     # Kalshi's WS v2 ticker channel sends nothing without an explicit market list.
@@ -215,7 +245,7 @@ async def run() -> None:
     # Shared marker so the housekeeping task can detect a stalled Kalshi feed.
     state_marker: dict = {"last_kalshi_ts": time.monotonic(), "last_calibration_ts": 0.0}
     housekeeping_task = asyncio.create_task(
-        _periodic_housekeeping(repo, coinbase_store, settings, state_marker)
+        _periodic_housekeeping(repo, coinbase_store, settings, state_marker, alerts)
     )
     fast_spot_task = asyncio.create_task(_fast_spot_writer(repo, coinbase_store))
     gap_repair_task = asyncio.create_task(_periodic_gap_repair(repo, settings))
@@ -267,6 +297,17 @@ async def run() -> None:
             verdict = risk.validate(order, state)
             if not verdict.allowed:
                 repo.log_event("risk_block", {"market_id": order.market_id, "reason": verdict.reason})
+                if (
+                    verdict.reason.startswith("kill_switch:")
+                    or verdict.reason in {
+                        "daily_loss_limit", "drawdown_limit", "max_tail_short_exposure",
+                    }
+                ):
+                    await alerts.emit(
+                        f"risk_{verdict.reason}",
+                        "Risk engine blocked an order",
+                        {"market_id": order.market_id, "reason": verdict.reason},
+                    )
                 continue
 
             result = executor.execute(order, state)

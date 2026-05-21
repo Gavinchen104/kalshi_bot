@@ -15,6 +15,7 @@ class EnvSettings(BaseSettings):
     bot_log_level: str = "INFO"
     bot_paper_mode: bool = True
     bot_allow_live_trading: bool = False
+    bot_alert_webhook_url: str = ""
 
 
 class AppConfig(BaseModel):
@@ -117,6 +118,15 @@ class MeasurementConfig(BaseModel):
     calibration_window: int = 500
 
 
+class MonitoringConfig(BaseModel):
+    alert_cooldown_seconds: int = 300
+    stalled_feed_seconds: int = 60
+    data_quality_window_hours: int = 48
+    data_quality_min_coverage: float = 0.95
+    calibration_drift_brier_threshold: float = 0.20
+    calibration_drift_min_samples: int = 100
+
+
 class Settings(BaseModel):
     app: AppConfig
     kalshi: KalshiConfig
@@ -128,6 +138,7 @@ class Settings(BaseModel):
     execution: ExecutionConfig
     storage: StorageConfig
     measurement: MeasurementConfig
+    monitoring: MonitoringConfig
     env: EnvSettings = Field(default_factory=EnvSettings)
 
 
@@ -147,5 +158,6 @@ def load_settings(path: str = "config/settings.yaml") -> Settings:
         execution=ExecutionConfig(**raw.get("execution", {})),
         storage=StorageConfig(**raw.get("storage", {})),
         measurement=MeasurementConfig(**raw.get("measurement", {})),
+        monitoring=MonitoringConfig(**raw.get("monitoring", {})),
         env=EnvSettings(),
     )

@@ -78,3 +78,11 @@ storage:
 measurement:
   calibration_bins: 10
   calibration_window: 500
+
+monitoring:
+  alert_cooldown_seconds: 300
+  stalled_feed_seconds: 60
+  data_quality_window_hours: 48
+  data_quality_min_coverage: 0.95
+  calibration_drift_brier_threshold: 0.20
+  calibration_drift_min_samples: 100
