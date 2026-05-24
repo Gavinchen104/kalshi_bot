@@ -699,7 +699,7 @@ def _collect_settled_pairs(db_path: str, settings) -> tuple[np.ndarray, np.ndarr
 
 def run_fit_calibrator(db_path: str, settings, out_path: str | None = None) -> int:
     """Fit the production isotonic calibrator on ALL settled history and persist
-    it to the configured path (settings.pricer.calibration_model_path).
+    it to the configured path (settings.strategy.calibration_model_path).
 
     Deployment fit uses every available settled pair — no held-out split. That
     is correct for production: the artifact is applied to *future* estimates
@@ -710,7 +710,7 @@ def run_fit_calibrator(db_path: str, settings, out_path: str | None = None) -> i
     from src.measurement.calibration import compute as _compute
     from src.strategy.calibrator import IsotonicCalibrator
 
-    target = out_path or settings.pricer.calibration_model_path
+    target = out_path or settings.strategy.calibration_model_path
     if not target:
         print("No calibration_model_path configured (settings.pricer) and no --out given.")
         return 1
@@ -863,11 +863,11 @@ def main() -> None:
     ap.add_argument(
         "--fit-calibrator", action="store_true",
         help="Fit the production isotonic calibrator on all settled history and "
-             "save it to settings.pricer.calibration_model_path (or --out).",
+             "save it to settings.strategy.calibration_model_path (or --out).",
     )
     ap.add_argument(
         "--out", default=None,
-        help="Output path for --fit-calibrator (default: settings.pricer.calibration_model_path).",
+        help="Output path for --fit-calibrator (default: settings.strategy.calibration_model_path).",
     )
     args = ap.parse_args()
 
