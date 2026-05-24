@@ -697,6 +697,59 @@ def _collect_settled_pairs(db_path: str, settings) -> tuple[np.ndarray, np.ndarr
     return raw, y
 
 
+def run_fit_calibrator(db_path: str, settings, out_path: str | None = None) -> int:
+    """Fit the production isotonic calibrator on ALL settled history and persist
+    it to the configured path (settings.pricer.calibration_model_path).
+
+    Deployment fit uses every available settled pair — no held-out split. That
+    is correct for production: the artifact is applied to *future* estimates
+    (genuinely out-of-sample), and the B1 mini-gate already proved the mapping
+    generalizes forward. Without this artifact the live EdgeStrategy silently
+    falls back to raw (uncalibrated) probabilities."""
+    from datetime import datetime as _dt
+    from src.measurement.calibration import compute as _compute
+    from src.strategy.calibrator import IsotonicCalibrator
+
+    target = out_path or settings.pricer.calibration_model_path
+    if not target:
+        print("No calibration_model_path configured (settings.pricer) and no --out given.")
+        return 1
+
+    print("=" * 78)
+    print("FIT PRODUCTION CALIBRATOR — Phase 3 B1 artifact")
+    print("=" * 78)
+
+    raw, y = _collect_settled_pairs(db_path, settings)
+    n = raw.size
+    print(f"\n  settled pairs (fit set): {n:,}")
+    if n < 100:
+        print("  too few settled pairs to fit a production calibrator")
+        print("=" * 78)
+        return 1
+
+    cal = IsotonicCalibrator().fit(raw, y)
+
+    # In-sample calibration improvement (sanity, not validation — the B1
+    # mini-gate is the out-of-sample test).
+    rep_raw = _compute(list(zip(raw.tolist(), y.astype(int).tolist())), n_bins=10)
+    p_cal = cal.predict(raw)
+    rep_cal = _compute(list(zip(p_cal.tolist(), y.astype(int).tolist())), n_bins=10)
+    print(f"  in-sample log loss : raw {rep_raw.log_loss:.4f}  →  cal {rep_cal.log_loss:.4f}")
+    print(f"  in-sample brier    : raw {rep_raw.brier:.4f}  →  cal {rep_cal.brier:.4f}")
+
+    cal.save(target, metadata={
+        "phase": "3", "workstream": "B1",
+        "fit_at": _dt.now(tz=timezone.utc).isoformat(),
+        "n_settled_pairs": int(n),
+        "db_path": db_path,
+        "note": "production isotonic calibrator; fit on all settled history",
+    })
+    print(f"\n  saved → {target}")
+    print("  live EdgeStrategy will load + apply this on next start.")
+    print("=" * 78)
+    return 0
+
+
 def run_mini_gate_b1(db_path: str, settings) -> int:
     """Phase 3 / Track B / B1 mini-gate.
 
@@ -807,6 +860,15 @@ def main() -> None:
         help="Run Phase-3 B1 mini-gate: fit isotonic calibrator on the earlier "
              "80%% of settled pairs, score on the last 20%%, exit code 1 on FAIL.",
     )
+    ap.add_argument(
+        "--fit-calibrator", action="store_true",
+        help="Fit the production isotonic calibrator on all settled history and "
+             "save it to settings.pricer.calibration_model_path (or --out).",
+    )
+    ap.add_argument(
+        "--out", default=None,
+        help="Output path for --fit-calibrator (default: settings.pricer.calibration_model_path).",
+    )
     args = ap.parse_args()
 
     settings = load_settings()
@@ -823,6 +885,9 @@ def main() -> None:
     if args.mini_gate_b1:
         import sys as _sys
         _sys.exit(run_mini_gate_b1(db_path, settings))
+    if args.fit_calibrator:
+        import sys as _sys
+        _sys.exit(run_fit_calibrator(db_path, settings, out_path=args.out))
 
     res = run_backtest(
         db_path, settings,
