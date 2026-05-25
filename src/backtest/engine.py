@@ -152,6 +152,8 @@ def run_backtest(
     repricer_mode: str = "replay",
     vol_mode: str | None = None,
     execution_mode: str = "one-entry",
+    calibrator_artifact_path: str | None = None,
+    since_iso: str | None = None,
 ) -> dict:
     """Replay the strategy over historical estimates.
 
@@ -165,11 +167,24 @@ def run_backtest(
         Phase-1 simplification); "faithful" honors the live rate-limit,
         per-market position cap, and gross-exposure cap, so trade-level PnL
         is comparable to a live run.
+      calibrator_artifact_path: if set, load an IsotonicCalibrator JSON and
+        apply `cal.predict_one()` to every raw prob before calibration metrics
+        and the strategy decision. Mirrors the live EdgeStrategy path. Used
+        by GATE B forward validation.
+      since_iso: skip estimates with computed_at < since_iso. Used by GATE B
+        to evaluate ONLY the forward window after the calibrator was deployed.
     """
     if repricer_mode not in ("replay", "reprice"):
         raise ValueError(f"unknown repricer_mode={repricer_mode!r}")
     if execution_mode not in ("one-entry", "faithful"):
         raise ValueError(f"unknown execution_mode={execution_mode!r}")
+
+    # Optional calibrator: applied to every raw prob just like live EdgeStrategy.
+    calibrator = None
+    if calibrator_artifact_path and Path(calibrator_artifact_path).exists():
+        from src.strategy.calibrator import IsotonicCalibrator as _IsoCal
+        calibrator = _IsoCal.load(calibrator_artifact_path)
+    since_ms = _parse_iso_ms(since_iso) if since_iso else None
 
     edge_threshold = settings.strategy.edge_threshold
     min_h = settings.strategy.min_horizon_seconds
@@ -218,7 +233,14 @@ def run_backtest(
     n_unparsable = 0
     n_unsettleable = 0
 
+    n_before_since = 0
     for e in estimates:
+        # GATE B forward window: skip estimates from before the calibrator went live.
+        if since_ms is not None:
+            ts = _parse_iso_ms(e["computed_at"])
+            if ts is not None and ts < since_ms:
+                n_before_since += 1
+                continue
         terms = parse_ticker(e["market_id"], now=_EPOCH, bracket_width_usd=bracket_w)
         if terms is None:
             n_unparsable += 1
@@ -272,6 +294,10 @@ def run_backtest(
             prob = float(est_re.prob)
         else:
             prob = float(e["prob"])
+        # Optional calibration layer: apply BEFORE both calibration metrics and
+        # the strategy decision so the report reflects the deployed pipeline.
+        if calibrator is not None:
+            prob = float(calibrator.predict_one(prob))
         calib_pairs.append((prob, outcome))
 
         # ── Strategy decision (mirror EdgeStrategy, minus depth filter) ──
@@ -361,6 +387,9 @@ def run_backtest(
         "execution_mode": execution_mode,
         "n_reprice_skipped": n_reprice_skipped,
         "n_rate_limited": n_rate_limited,
+        "n_before_since": n_before_since,
+        "calibrator_loaded": calibrator is not None,
+        "since_iso": since_iso,
         "n_cap_blocked": n_cap_blocked,
     }
 
@@ -832,6 +861,148 @@ def run_mini_gate_b1(db_path: str, settings) -> int:
     return rc
 
 
+def _read_calibrator_fit_at(artifact_path: str | None) -> str | None:
+    """Read the production calibrator's `metadata.fit_at` ISO timestamp.
+    That's the earliest moment the live pipeline could have been emitting
+    calibrated probs — the natural default GATE B 'since' boundary."""
+    if not artifact_path or not Path(artifact_path).exists():
+        return None
+    try:
+        import json as _json
+        payload = _json.loads(Path(artifact_path).read_text(encoding="utf-8"))
+        meta = payload.get("metadata") or {}
+        v = meta.get("fit_at")
+        return str(v) if v else None
+    except Exception:
+        return None
+
+
+def _coverage_pct(db_path: str, since_iso: str, now_iso: str | None = None) -> tuple[float, int]:
+    """Coinbase candle coverage % over the GATE B forward window + largest gap (minutes).
+    Reuses find_candle_gaps so the metric matches the dashboard / WS3 acceptance bar."""
+    from src.data.coinbase_ws import find_candle_gaps
+    import sqlite3
+    s_ms = _parse_iso_ms(since_iso)
+    if s_ms is None:
+        return 0.0, 0
+    e_ms = _parse_iso_ms(now_iso) if now_iso else int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+    total_min = max(1, (e_ms - s_ms) // 60_000)
+    conn = sqlite3.connect(db_path)
+    try:
+        ts = [int(r[0]) for r in conn.execute(
+            "SELECT timestamp_ms FROM coinbase_candle WHERE timestamp_ms >= ? AND timestamp_ms < ? "
+            "ORDER BY timestamp_ms ASC",
+            (s_ms, e_ms),
+        ).fetchall()]
+    finally:
+        conn.close()
+    have = len(ts)
+    coverage_pct = 100.0 * have / total_min
+    gaps = find_candle_gaps(ts, s_ms, e_ms)
+    max_gap_min = (max((b - a) // 60_000 for a, b in gaps)) if gaps else 0
+    return float(coverage_pct), int(max_gap_min)
+
+
+def run_gate_b(
+    db_path: str,
+    settings,
+    since_iso: str | None = None,
+    min_days: int = 5,
+) -> int:
+    """Phase 3 / A3 GATE B — forward paper validation.
+
+    Evaluates the *deployed calibrated* pipeline over the post-deploy window.
+    PASS iff every criterion holds:
+      1) ≥ min_days of forward data
+      2) Calibrated log loss < 0.69  AND  tail-bin emp < 0.02   (same bar as B1)
+      3) Edge-decile realized PnL monotone-rising (≥ 7/9 + spread ≥ 2¢)
+      4) Net paper PnL > total fees over the window
+      5) Coinbase candle coverage ≥ 95% in the window (no big gaps)
+    Returns exit code 0 on PASS, 1 on FAIL — suitable for CI gating."""
+    artifact = settings.strategy.calibration_model_path
+
+    # Resolve forward window start.
+    eff_since = since_iso or _read_calibrator_fit_at(artifact)
+    if eff_since is None:
+        print("GATE B requires either --since or a calibrator artifact with metadata.fit_at.")
+        return 1
+    if not artifact or not Path(artifact).exists():
+        print(f"GATE B requires a deployed calibrator artifact "
+              f"(settings.strategy.calibration_model_path = {artifact!r}).")
+        print("Run `python -m src.backtest.engine --fit-calibrator` first.")
+        return 1
+
+    print("=" * 78)
+    print("GATE B — Phase 3 / A3 forward paper validation")
+    print("=" * 78)
+    print(f"  artifact : {artifact}")
+    print(f"  since    : {eff_since}")
+
+    res = run_backtest(
+        db_path, settings,
+        repricer_mode="replay",
+        vol_mode=None,
+        execution_mode="faithful",
+        calibrator_artifact_path=artifact,
+        since_iso=eff_since,
+    )
+    rep = res["calibration"]
+    trades = res["trades"]
+    n_settle = res["n_settleable"]
+
+    # --- 1) Days covered ---
+    since_ms = _parse_iso_ms(eff_since) or 0
+    now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+    days_covered = (now_ms - since_ms) / (24 * 3600 * 1000)
+    days_ok = days_covered >= min_days
+
+    # --- 2) Calibration bar (mirrors B1 mini-gate) ---
+    ll_ok = (rep.n_samples > 0 and rep.log_loss is not None and rep.log_loss < 0.69)
+    tail_emp = next(
+        (b["emp_freq"] for b in rep.bins
+         if b["lo"] == 0.0 and b["hi"] == 0.1 and b["emp_freq"] is not None),
+        None,
+    )
+    tail_ok = tail_emp is not None and tail_emp < 0.02
+
+    # --- 3) Edge-decile monotonicity ---
+    mono = _monotonicity_check(_decile_table(trades))
+
+    # --- 4) Net paper PnL > fees ---
+    fees = sum(t.fee_cents for t in trades)
+    net = sum(t.pnl_cents for t in trades)
+    pnl_ok = net > fees
+
+    # --- 5) Coverage / no big gaps ---
+    cov_pct, max_gap_min = _coverage_pct(db_path, eff_since)
+    cov_ok = cov_pct >= 95.0
+
+    # ── Report ──────────────────────────────────────────────
+    print(f"\n  forward days covered : {days_covered:>6.2f}     {'PASS' if days_ok else 'FAIL'}  "
+          f"(≥ {min_days})")
+    print(f"  settleable n (window): {n_settle:>6,}")
+    ll = f"{rep.log_loss:.4f}" if rep.log_loss is not None else "—"
+    print(f"  cal log loss         : {ll:>10}   {'PASS' if ll_ok else 'FAIL'}  (< 0.69)")
+    te = f"{tail_emp:.4f}" if tail_emp is not None else "—"
+    print(f"  cal tail bin emp     : {te:>10}   {'PASS' if tail_ok else 'FAIL'}  (< 0.02)")
+    print(f"  decile monotonicity  : {mono['note']:>26}  {'PASS' if mono['passes'] else 'FAIL'}")
+    print(f"  net PnL              : {net/100:>+8.2f} USD vs fees {fees/100:.2f}   "
+          f"{'PASS' if pnl_ok else 'FAIL'}  (net > fees)")
+    print(f"  candle coverage      : {cov_pct:>5.1f}% (max gap {max_gap_min}m)   "
+          f"{'PASS' if cov_ok else 'FAIL'}  (≥ 95%)")
+
+    passes = all([days_ok, ll_ok, tail_ok, mono["passes"], pnl_ok, cov_ok])
+    print("\n  ──────────────────────────────────────────────────────────────")
+    if passes:
+        print(f"  GATE B: ✅ PASS  → proceed to A4 risk hardening + GATE C tiny-size live")
+        rc = 0
+    else:
+        print(f"  GATE B: ❌ FAIL  → diagnose live/backtest divergence; do NOT proceed to GATE C")
+        rc = 1
+    print("=" * 78)
+    return rc
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Replay-backtest Strategy 2.")
     ap.add_argument("--db", default=None, help="SQLite DB path (default: from settings)")
@@ -869,6 +1040,20 @@ def main() -> None:
         "--out", default=None,
         help="Output path for --fit-calibrator (default: settings.strategy.calibration_model_path).",
     )
+    ap.add_argument(
+        "--gate-b", action="store_true",
+        help="Phase-3 A3 GATE B forward paper validation over the post-deploy "
+             "window. Exit 1 unless calibration + monotonicity + PnL + coverage "
+             "+ ≥min-days all pass.",
+    )
+    ap.add_argument(
+        "--since", default=None,
+        help="GATE B forward-window start (ISO8601). Default: calibrator artifact's metadata.fit_at.",
+    )
+    ap.add_argument(
+        "--min-days", type=int, default=5,
+        help="GATE B minimum forward-window length in days (default 5).",
+    )
     args = ap.parse_args()
 
     settings = load_settings()
@@ -888,6 +1073,9 @@ def main() -> None:
     if args.fit_calibrator:
         import sys as _sys
         _sys.exit(run_fit_calibrator(db_path, settings, out_path=args.out))
+    if args.gate_b:
+        import sys as _sys
+        _sys.exit(run_gate_b(db_path, settings, since_iso=args.since, min_days=args.min_days))
 
     res = run_backtest(
         db_path, settings,
