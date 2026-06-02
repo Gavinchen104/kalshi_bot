@@ -65,13 +65,17 @@ Failing any item means diagnose paper/live divergence before live trading.
 
 GATE C may be considered only after GATE B passes.
 
-- Set `sizing.max_contracts_per_trade: 1`.
-- Confirm A4 controls are enabled: per-market cap, gross cap, tail-short cap,
-  vol-regime kill switch, daily loss limit, and max drawdown halt.
-- Keep `BOT_ALLOW_LIVE_TRADING=false` until a human writes an explicit go
-  decision with date, reviewer, bankroll, and rollback trigger.
-- If approved, run tiny live only. Two consecutive green realized-PnL weeks are
-  required before Phase 4 can be discussed.
+**The authoritative checklist is [`docs/GATE_C_CHECKLIST.md`](GATE_C_CHECKLIST.md).**
+This section is only a summary; do not skip the checklist.
+
+- Copy the template to `docs/gate_c_signoffs/<YYYY-MM-DD>-tinylive.md`, work
+  through all 8 sections, fill the sign-off block (operator + reviewer).
+- No item may be skipped or partial-deployed. A failed line → fix, redo.
+- `BOT_ALLOW_LIVE_TRADING=true` only after the checklist is fully ✅ and the
+  sign-off block is filled, per §8 of the checklist.
+- After sign-off: tiny live only (`sizing.max_contracts_per_trade: 1`).
+  Two consecutive green realized-PnL weeks before any scale-up discussion
+  (Phase 4 / §A6 ladder).
 
 ## A6 Scaling Ladder Definition
 
